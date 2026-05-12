@@ -139,15 +139,15 @@ time.sleep(2)
 
 # Read current focused lens position
 metadata = picam2.capture_metadata()
-lens_position = metadata.get("LensPosition")
+#lens_position = metadata.get("LensPosition")
 
-print("Locked lens position:", lens_position)
+#print("Locked lens position:", lens_position)
 
 # Lock focus manually at current position
-if lens_position is not None:
-    picam2.set_controls({"AfMode": 0, "LensPosition": lens_position})
-else:
-    print("Could not read lens position; staying in continuous autofocus")
+#if lens_position is not None:
+#   picam2.set_controls({"AfMode": 0, "LensPosition": lens_position})
+#else:
+#    print("Could not read lens position; staying in continuous autofocus")
 
 print("Scanner started. Press q to quit.")
 show_status("READY", "Scan badge QR")
