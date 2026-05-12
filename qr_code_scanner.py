@@ -52,6 +52,8 @@ def send_checkin(qr_data):
         return response.json()
 
     except requests.RequestException as e:
+        print("REQUEST ERROR:", repr(e))
+
         return {
             "success": False,
             "status": "offline",
