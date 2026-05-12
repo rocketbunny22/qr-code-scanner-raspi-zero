@@ -1,4 +1,5 @@
 from picamera2 import Picamera2
+
 from pyzbar.pyzbar import decode
 import cv2
 import time
@@ -52,13 +53,11 @@ def show_status(text, subtext=""):
     draw = ImageDraw.Draw(image)
 
     font_big = ImageFont.truetype(
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        24
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24
     )
 
     font_small = ImageFont.truetype(
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        14
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14
     )
 
     draw.text((10, 25), text, font=font_big, fill=0)
@@ -76,15 +75,26 @@ picam2 = Picamera2()
 
 picam2.configure(
     picam2.create_video_configuration(
-        main={"format": "YUV420", "size": (WIDTH, HEIGHT)},
-        controls={"FrameRate": 30}
+        main={"format": "YUV420", "size": (WIDTH, HEIGHT)}, controls={"FrameRate": 30}
     )
 )
 
 picam2.start()
-picam2.set_controls({"AfMode": 2})  # continuous autofocus
+# Start continuous autofocus
+picam2.set_controls({"AfMode": 2})
+time.sleep(2)
 
-time.sleep(1)
+# Read current focused lens position
+metadata = picam2.capture_metadata()
+lens_position = metadata.get("LensPosition")
+
+print("Locked lens position:", lens_position)
+
+# Lock focus manually at current position
+if lens_position is not None:
+    picam2.set_controls({"AfMode": 0, "LensPosition": lens_position})
+else:
+    print("Could not read lens position; staying in continuous autofocus")
 
 print("Scanner started. Press q to quit.")
 show_status("READY", "Scan badge QR")
@@ -114,13 +124,7 @@ while True:
 
         x, y, w, h = code.rect
 
-        cv2.rectangle(
-            display,
-            (x, y),
-            (x + w, y + h),
-            (0, 255, 0),
-            2
-        )
+        cv2.rectangle(display, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
         cv2.putText(
             display,
@@ -129,7 +133,7 @@ while True:
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
             (0, 255, 0),
-            2
+            2,
         )
 
         if data not in seen:
