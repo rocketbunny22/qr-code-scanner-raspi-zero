@@ -10,7 +10,7 @@ import requests
 
 sys.path.append("/home/viztech/e-Paper/RaspberryPi_JetsonNano/python/lib")
 
-API_URL = "https://ohiofurnitureguild.com/wp-json/ofg-scanner/v1/checkin"
+API_URL = "https://staging.ohiofurnitureguild.com/wp-json/ofg-scanner/v1/checkin"
 API_TOKEN = "ohfm_sfd6g7sd6fv76sdfv76s7d8fv678v7ds7v76s8s89d7f87967678d6f76s89789789"
 SCANNER_ID = "scanner-1"
 
