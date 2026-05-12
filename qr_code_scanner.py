@@ -1,13 +1,63 @@
-from picamera2 import Picamera2
-
-from pyzbar.pyzbar import decode
-import cv2
-import time
 import sys
+import time
+from urllib.parse import parse_qs, urlparse
+
+import cv2
+from PIL import Image, ImageDraw, ImageFont
+from picamera2 import Picamera2
+from pyzbar.pyzbar import decode
+import requests
 
 sys.path.append("/home/viztech/e-Paper/RaspberryPi_JetsonNano/python/lib")
 
-from PIL import Image, ImageDraw, ImageFont
+API_URL = "https://ohiofurnitureguild.com/wp-json/ofg-scanner/v1/checkin"
+API_TOKEN = "CHANGE_THIS_TO_A_LONG_RANDOM_SECRET"
+SCANNER_ID = "scanner-1"
+
+
+def parse_qr_url(qr_data):
+    parsed = urlparse(qr_data)
+    params = parse_qs(parsed.query)
+
+    return {
+        "company_id": params.get("company_id", [""])[0],
+        "attendee": params.get("attendee", [""])[0],
+    }
+
+
+def send_checkin(qr_data):
+    qr = parse_qr_url(qr_data)
+
+    if not qr["company_id"] or not qr["attendee"]:
+        return {
+            "success": False,
+            "status": "invalid",
+            "message": "Missing company_id or attendee",
+        }
+
+    try:
+        response = requests.post(
+            API_URL,
+            json={
+                "company_id": qr["company_id"],
+                "attendee": qr["attendee"],
+                "scanner_id": SCANNER_ID,
+            },
+            headers={
+                "X-Scanner-Token": API_TOKEN,
+            },
+            timeout=5,
+        )
+
+        return response.json()
+
+    except requests.RequestException as e:
+        return {
+            "success": False,
+            "status": "offline",
+            "message": str(e),
+        }
+
 
 # ----------------------------
 # Camera settings
@@ -75,7 +125,8 @@ picam2 = Picamera2()
 
 picam2.configure(
     picam2.create_video_configuration(
-        main={"format": "YUV420", "size": (WIDTH, HEIGHT)}, controls={"FrameRate": 30}
+        main={"format": "YUV420", "size": (WIDTH, HEIGHT)},
+        controls={"FrameRate": 30},
     )
 )
 
@@ -135,12 +186,33 @@ while True:
             (0, 255, 0),
             2,
         )
-
         if data not in seen:
             seen.add(data)
 
             print("QR:", data)
-            show_status("CHECKED IN", data[:28])
+
+            result = send_checkin(data)
+            status = result.get("status")
+
+            if status == "checked_in":
+                print("Checked in:", result)
+                show_status("CHECKED IN", result.get("attendee", "")[:28])
+
+            elif status == "not_found":
+                print("Not found:", result)
+                show_status("NOT FOUND", "See kiosk")
+
+            elif status == "invalid":
+                print("Invalid:", result)
+                show_status("INVALID QR", "Missing data")
+
+            elif status == "offline":
+                print("Offline:", result)
+                show_status("OFFLINE", "Network error")
+
+            else:
+                print("Error:", result)
+                show_status("ERROR", "See kiosk")
 
             time.sleep(1.5)
             show_status("READY", "Scan next badge")
