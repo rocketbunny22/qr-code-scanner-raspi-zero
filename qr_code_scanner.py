@@ -10,8 +10,8 @@ import requests
 
 sys.path.append("/home/viztech/e-Paper/RaspberryPi_JetsonNano/python/lib")
 
-API_URL = "https://staging.ohiofurnitureguild.com/wp-json/ofg-scanner/v1/checkin"
-API_TOKEN = "ohfm_sfd6g7sd6fv76sdfv76s7d8fv678v7ds7v76s8s89d7f87967678d6f76s89789789"
+API_URL = "https://staging.ohiofurnitureguild.com/wp-json/ofg-scanner/v1/checkin/"
+API_TOKEN = "NOT_REAL_KEY"
 SCANNER_ID = "scanner-1"
 
 
@@ -45,11 +45,28 @@ def send_checkin(qr_data):
             },
             headers={
                 "X-Scanner-Token": API_TOKEN,
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "OFG-QR-Scanner/1.0",
             },
-            timeout=5,
+            timeout=10,
         )
 
-        return response.json()
+        print("API URL:", API_URL)
+        print("API status:", response.status_code)
+        print("API content-type:", response.headers.get("content-type"))
+        print("API body:", response.text[:500])
+
+        try:
+            return response.json()
+        except ValueError:
+            return {
+                "success": False,
+                "status": "bad_response",
+                "message": "Server did not return JSON",
+                "http_status": response.status_code,
+                "body": response.text[:500],
+            }
 
     except requests.RequestException as e:
         print("REQUEST ERROR:", repr(e))
@@ -170,24 +187,24 @@ while True:
         codes = decode(gray)
 
     # Convert grayscale to BGR only for display overlays
-    display = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    #display = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
     for code in codes:
         data = code.data.decode("utf-8")
 
         x, y, w, h = code.rect
 
-        cv2.rectangle(display, (x, y), (x + w, y + h), (0, 255, 0), 2)
+#        cv2.rectangle(display, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-        cv2.putText(
-            display,
-            data[:40],
-            (x, max(y - 10, 20)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 255, 0),
-            2,
-        )
+        #cv2.putText(
+           # display,
+           # data[:40],
+           # (x, max(y - 10, 20)),
+            #cv2.FONT_HERSHEY_SIMPLEX,
+            #0.5,
+            #(0, 255, 0),
+            #2,
+        #)
         if data not in seen:
             seen.add(data)
 
@@ -212,6 +229,10 @@ while True:
                 print("Offline:", result)
                 show_status("OFFLINE", "Network error")
 
+            elif status == "bad_response":
+                print("Bad response:", result)
+                show_status("BAD RESPONSE", str(result.get("http_status", "")))
+
             else:
                 print("Error:", result)
                 show_status("ERROR", "See kiosk")
@@ -226,7 +247,7 @@ while True:
             time.sleep(1.5)
             show_status("READY", "Scan next badge")
 
-    cv2.imshow("QR Scanner Preview", display)
+    #cv2.imshow("QR Scanner Preview", display)
 
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
@@ -236,3 +257,4 @@ cv2.destroyAllWindows()
 
 if USE_EINK:
     epd.sleep()
+
