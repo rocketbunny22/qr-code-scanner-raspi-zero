@@ -88,53 +88,53 @@ HEIGHT = 480
 # E-ink settings
 # Update these for your display
 # ----------------------------
-EINK_WIDTH = 250
-EINK_HEIGHT = 122
-
-USE_EINK = True
-
-try:
-    # Example Waveshare import.
-    # Change this to match your exact display driver.
-    #
-    # Common examples:
-    # from waveshare_epd import epd2in13_V4
-    # epd = epd2in13_V4.EPD()
-    #
-    from waveshare_epd import epd2in13_V4
-
-    epd = epd2in13_V4.EPD()
-    epd.init()
-    epd.Clear()
-
-except Exception as e:
-    USE_EINK = False
-    print("E-ink disabled:", e)
-
-
-def show_status(text, subtext=""):
-    print(f"STATUS: {text} {subtext}")
-
-    if not USE_EINK:
-        return
-
-    image = Image.new("1", (EINK_WIDTH, EINK_HEIGHT), 255)
-    draw = ImageDraw.Draw(image)
-
-    font_big = ImageFont.truetype(
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24
-    )
-
-    font_small = ImageFont.truetype(
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14
-    )
-
-    draw.text((10, 25), text, font=font_big, fill=0)
-
-    if subtext:
-        draw.text((10, 65), subtext[:28], font=font_small, fill=0)
-
-    epd.display(epd.getbuffer(image))
+#EINK_WIDTH = 250
+#EINK_HEIGHT = 122
+#
+#USE_EINK = True
+#
+#try:
+#    # Example Waveshare import.
+#    # Change this to match your exact display driver.
+#    #
+#    # Common examples:
+#    # from waveshare_epd import epd2in13_V4
+#    # epd = epd2in13_V4.EPD()
+#    #
+#    from waveshare_epd import epd2in13_V4
+#
+#    epd = epd2in13_V4.EPD()
+#    epd.init()
+#    epd.Clear()
+#
+#except Exception as e:
+#    USE_EINK = False
+#    print("E-ink disabled:", e)
+##
+#
+#def show_status(text, subtext=""):
+#    print(f"STATUS: {text} {subtext}")
+#
+#    if not USE_EINK:
+#        return
+#
+#    image = Image.new("1", (EINK_WIDTH, EINK_HEIGHT), 255)
+#    draw = ImageDraw.Draw(image)
+#
+#    font_big = ImageFont.truetype(
+#        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24
+#    )
+#
+#    font_small = ImageFont.truetype(
+#        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14
+#    )
+#
+#    draw.text((10, 25), text, font=font_big, fill=0)
+#
+#    if subtext:
+#        draw.text((10, 65), subtext[:28], font=font_small, fill=0)
+#
+#    epd.display(epd.getbuffer(image))
 
 
 # ----------------------------
@@ -152,7 +152,7 @@ picam2.configure(
 picam2.start()
 # Start continuous autofocus
 picam2.set_controls({"AfMode": 2})
-time.sleep(2)
+#time.sleep(2)
 
 # Read current focused lens position
 metadata = picam2.capture_metadata()
@@ -167,7 +167,7 @@ metadata = picam2.capture_metadata()
 #    print("Could not read lens position; staying in continuous autofocus")
 
 print("Scanner started. Press q to quit.")
-show_status("READY", "Scan badge QR")
+#show_status("READY", "Scan badge QR")
 
 seen = set()
 frame_count = 0
@@ -215,37 +215,34 @@ while True:
 
             if status == "checked_in":
                 print("Checked in:", result)
-                show_status("CHECKED IN", result.get("attendee", "")[:28])
+                #show_status("CHECKED IN", result.get("attendee", "")[:28])
 
             elif status == "not_found":
                 print("Not found:", result)
-                show_status("NOT FOUND", "See kiosk")
+                #show_status("NOT FOUND", "See kiosk")
 
             elif status == "invalid":
                 print("Invalid:", result)
-                show_status("INVALID QR", "Missing data")
+                #show_status("INVALID QR", "Missing data")
 
             elif status == "offline":
                 print("Offline:", result)
-                show_status("OFFLINE", "Network error")
+                #show_status("OFFLINE", "Network error")
 
             elif status == "bad_response":
                 print("Bad response:", result)
-                show_status("BAD RESPONSE", str(result.get("http_status", "")))
+                #show_status("BAD RESPONSE", str(result.get("http_status", "")))
 
             else:
                 print("Error:", result)
-                show_status("ERROR", "See kiosk")
+                #show_status("ERROR", "See kiosk")
 
-            time.sleep(1.5)
-            show_status("READY", "Scan next badge")
+            time.sleep(0.3)
+            #show_status("READY", "Scan next badge")
 
         else:
             print("Duplicate:", data)
-            show_status("DUPLICATE", data[:28])
-
-            time.sleep(1.5)
-            show_status("READY", "Scan next badge")
+            #show_status("READY", "Scan next badge")
 
     #cv2.imshow("QR Scanner Preview", display)
 
@@ -255,6 +252,6 @@ while True:
 picam2.stop()
 cv2.destroyAllWindows()
 
-if USE_EINK:
-    epd.sleep()
+#if USE_EINK:
+    #epd.sleep()
 
