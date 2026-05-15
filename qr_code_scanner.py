@@ -1,7 +1,8 @@
 import sys
 import time
 from urllib.parse import parse_qs, urlparse
-
+from dotenv import load_dotenv
+import os
 import cv2
 from PIL import Image, ImageDraw, ImageFont
 from picamera2 import Picamera2
@@ -10,8 +11,8 @@ import requests
 
 sys.path.append("/home/viztech/e-Paper/RaspberryPi_JetsonNano/python/lib")
 
-API_URL = "https://staging.ohiofurnitureguild.com/wp-json/ofg-scanner/v1/checkin/"
-API_TOKEN = "NOT_REAL_KEY"
+API_URL = os.getenv("OFG_URL")
+API_TOKEN = os.getenv("OFG_API_KEY")
 SCANNER_ID = "scanner-1"
 
 
