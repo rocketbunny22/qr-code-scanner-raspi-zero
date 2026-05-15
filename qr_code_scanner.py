@@ -8,12 +8,20 @@ from PIL import Image, ImageDraw, ImageFont
 from picamera2 import Picamera2
 from pyzbar.pyzbar import decode
 import requests
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 
 sys.path.append("/home/viztech/e-Paper/RaspberryPi_JetsonNano/python/lib")
 
 API_URL = os.getenv("OFG_URL")
 API_TOKEN = os.getenv("OFG_API_KEY")
 SCANNER_ID = "scanner-1"
+
+print("ENV path:", BASE_DIR / ".env")
+print("URL:", repr(API_URL))
+print("KEY:", repr(API_TOKEN))
 
 
 def parse_qr_url(qr_data):
@@ -27,6 +35,7 @@ def parse_qr_url(qr_data):
 
 
 def send_checkin(qr_data):
+    print(API_URL)
     qr = parse_qr_url(qr_data)
 
     if not qr["company_id"] or not qr["attendee"]:
@@ -71,6 +80,7 @@ def send_checkin(qr_data):
 
     except requests.RequestException as e:
         print("REQUEST ERROR:", repr(e))
+        print(API_URL)
 
         return {
             "success": False,
@@ -255,4 +265,5 @@ cv2.destroyAllWindows()
 
 if USE_EINK:
     epd.sleep()
+
 
