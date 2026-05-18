@@ -6,7 +6,7 @@ import os
 import cv2
 from PIL import Image, ImageDraw, ImageFont
 from picamera2 import Picamera2
-from pyzbar.pyzbar import decode
+from pyzbar.pyzbar import decode, ZBarSymbol
 import requests
 from pathlib import Path
 
@@ -195,7 +195,7 @@ while True:
 
     # Decode every 3rd frame for performance
     if frame_count % 3 == 0:
-        codes = decode(gray)
+        codes = decode(gray, symbols=[ZBarSymbol.QRCODE])
 
     # Convert grayscale to BGR only for display overlays
     #display = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
