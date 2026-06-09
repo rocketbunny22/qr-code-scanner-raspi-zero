@@ -273,13 +273,6 @@ try:
     # RST  -> GPIO17 / physical pin 11
     # BUSY -> GPIO24 / physical pin 18
 
-    from waveshare_epd import epdconfig
-
-    epdconfig.RST_PIN = EPD_RST_PIN
-    epdconfig.DC_PIN = EPD_DC_PIN
-    epdconfig.CS_PIN = EPD_CS_PIN
-    epdconfig.BUSY_PIN = EPD_BUSY_PIN
-
     from waveshare_epd import epd2in13_V4
 
     epd = epd2in13_V4.EPD()
