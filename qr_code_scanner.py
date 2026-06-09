@@ -36,7 +36,7 @@ YELLOW_LED_PIN = 6    # physical pin 31
 GREEN_LED_PIN = 16    # physical pin 36
 
 # Passive beeper
-BUZZER_PIN = 18       # physical pin 12
+BUZZER_PIN = 13       # physical pin 12
 
 # Waveshare e-paper wired connector pins
 # These match the normal Waveshare Raspberry Pi SPI wiring:
