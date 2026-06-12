@@ -338,6 +338,9 @@ picam2.set_controls({"AfMode": 2})
 
 print("Scanner started. Press q to quit.")
 signal_ready()
+beep(1800, 0.5)
+time.sleep(0.05)
+beep(2000, 0.35)
 show_status("READY", "Scan badge QR")
 
 seen = set()
