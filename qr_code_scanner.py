@@ -355,6 +355,11 @@ try:
     # Start continuous autofocus
     picam2.set_controls({"AfMode": 2})
 
+    startup_frame = picam2.capture_array("main")
+
+    if startup_frame is None or startup_frame.size == 0:
+        raise RuntimeError("Camera started but did not return a frame")
+
 except Exception as e:
     hold_startup_failure("STARTUP FAIL", "Camera error", e)
 
@@ -370,7 +375,14 @@ frame_count = 0
 
 try:
     while True:
-        frame = picam2.capture_array("main")
+        try:
+            frame = picam2.capture_array("main")
+        except Exception as e:
+            hold_startup_failure("STARTUP FAIL", "Camera error", e)
+
+        if frame is None or frame.size == 0:
+            hold_startup_failure("STARTUP FAIL", "Camera error")
+
         frame_count += 1
 
         # Extract grayscale plane from YUV420
