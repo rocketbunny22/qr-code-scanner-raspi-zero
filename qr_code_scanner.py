@@ -56,6 +56,8 @@ EPD_BUSY_PIN = 24     # physical pin 18
 USE_LIGHTS = True
 USE_BUZZER = True
 LED_BRIGHTNESS = 1.0
+SUCCESS_HOLD_SECONDS = 5
+RESULT_HOLD_SECONDS = 0.8
 
 try:
     from gpiozero import PWMLED
@@ -409,12 +411,14 @@ try:
 
             result = send_checkin(data)
             status = result.get("status")
+            result_hold_seconds = RESULT_HOLD_SECONDS
 
             if status == "checked_in":
                 print("Checked in:", result)
                 signal_success()
                 beep_success()
                 show_status("CHECKED IN", result.get("attendee", "")[:30])
+                result_hold_seconds = SUCCESS_HOLD_SECONDS
 
             elif status == "not_found":
                 print("Not found:", result)
@@ -446,7 +450,7 @@ try:
                 beep_failure()
                 show_status("ERROR", "See kiosk")
 
-            time.sleep(0.8)
+            time.sleep(result_hold_seconds)
 
             signal_ready()
             show_status("READY", "Scan next badge")
