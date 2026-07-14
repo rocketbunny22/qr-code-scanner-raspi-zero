@@ -58,6 +58,7 @@ EPD_BUSY_PIN = 24     # physical pin 18
 USE_LIGHTS = True
 USE_BUZZER = True
 LED_BRIGHTNESS = 1.0
+BUZZER_VOLUME = 1.0
 SUCCESS_HOLD_SECONDS = 5
 RESULT_HOLD_SECONDS = 0.8
 CAMERA_CAPTURE_TIMEOUT_SECONDS = 5
@@ -135,7 +136,7 @@ def beep(frequency=1000, duration=0.12):
         return
 
     buzzer.frequency = frequency
-    buzzer.value = 1.0
+    buzzer.value = BUZZER_VOLUME
     time.sleep(duration)
     buzzer.off()
 
