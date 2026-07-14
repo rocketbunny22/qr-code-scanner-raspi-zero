@@ -135,7 +135,7 @@ def beep(frequency=1000, duration=0.12):
         return
 
     buzzer.frequency = frequency
-    buzzer.value = 1
+    buzzer.value = 1.0
     time.sleep(duration)
     buzzer.off()
 
