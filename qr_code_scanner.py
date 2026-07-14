@@ -147,6 +147,10 @@ def beep_failure():
     beep(350, 0.35)
 
 
+def beep_duplicate():
+    beep(900, 0.2)
+
+
 def hold_startup_failure(text, subtext="", error=None):
     print(f"STARTUP FAILURE: {text} {subtext}")
 
@@ -401,6 +405,12 @@ try:
 
             if data in seen:
                 print("Duplicate:", data)
+                signal_processing()
+                beep_duplicate()
+                show_status("DUPLICATE", "Already scanned")
+                time.sleep(RESULT_HOLD_SECONDS)
+                signal_ready()
+                show_status("READY", "Scan next badge")
                 continue
 
             seen.add(data)
