@@ -139,8 +139,8 @@ def beep(frequency=1000, duration=0.12):
 
 def beep_success():
     beep(1200, 0.08)
-    time.sleep(0.05)
-    beep(1600, 0.08)
+    time.sleep(0.02)
+    beep(1600, 0.05)
 
 
 def beep_failure():
@@ -371,8 +371,8 @@ except Exception as e:
 
 print("Scanner started. Press q to quit.")
 signal_ready()
-beep(1800, 0.5)
-time.sleep(0.05)
+beep(1800, 0.355555)
+time.sleep(0.02)
 beep(2000, 0.35)
 show_status("READY", "Scan badge QR")
 
