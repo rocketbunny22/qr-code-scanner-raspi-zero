@@ -55,13 +55,14 @@ EPD_BUSY_PIN = 24     # physical pin 18
 # ----------------------------
 USE_LIGHTS = True
 USE_BUZZER = True
+LED_BRIGHTNESS = 1.0
 
 try:
-    from gpiozero import LED, PWMOutputDevice
+    from gpiozero import PWMLED
 
-    red_led = LED(RED_LED_PIN)
-    yellow_led = LED(YELLOW_LED_PIN)
-    green_led = LED(GREEN_LED_PIN)
+    red_led = PWMLED(RED_LED_PIN)
+    yellow_led = PWMLED(YELLOW_LED_PIN)
+    green_led = PWMLED(GREEN_LED_PIN)
 
 except Exception as e:
     USE_LIGHTS = False
@@ -105,7 +106,7 @@ def signal_processing():
         return
 
     lights_off()
-    yellow_led.on()
+    yellow_led.value = LED_BRIGHTNESS
 
 
 def signal_success():
@@ -113,7 +114,7 @@ def signal_success():
         return
 
     lights_off()
-    green_led.on()
+    green_led.value = LED_BRIGHTNESS
 
 
 def signal_failure():
@@ -121,7 +122,7 @@ def signal_failure():
         return
 
     lights_off()
-    red_led.on()
+    red_led.value = LED_BRIGHTNESS
 
 
 def beep(frequency=1000, duration=0.12):
@@ -142,6 +143,20 @@ def beep_success():
 
 def beep_failure():
     beep(350, 0.35)
+
+
+def hold_startup_failure(text, subtext="", error=None):
+    print(f"STARTUP FAILURE: {text} {subtext}")
+
+    if error is not None:
+        print("STARTUP ERROR:", repr(error))
+
+    signal_failure()
+    beep_failure()
+    show_status(text, subtext)
+
+    while True:
+        time.sleep(60)
 
 
 # ----------------------------
@@ -322,19 +337,26 @@ def show_status(text, subtext=""):
 # ----------------------------
 # Camera setup
 # ----------------------------
-picam2 = Picamera2()
+if not API_URL or not API_TOKEN:
+    hold_startup_failure("STARTUP FAIL", "Missing API config")
 
-picam2.configure(
-    picam2.create_video_configuration(
-        main={"format": "YUV420", "size": (WIDTH, HEIGHT)},
-        controls={"FrameRate": 30},
+try:
+    picam2 = Picamera2()
+
+    picam2.configure(
+        picam2.create_video_configuration(
+            main={"format": "YUV420", "size": (WIDTH, HEIGHT)},
+            controls={"FrameRate": 30},
+        )
     )
-)
 
-picam2.start()
+    picam2.start()
 
-# Start continuous autofocus
-picam2.set_controls({"AfMode": 2})
+    # Start continuous autofocus
+    picam2.set_controls({"AfMode": 2})
+
+except Exception as e:
+    hold_startup_failure("STARTUP FAIL", "Camera error", e)
 
 print("Scanner started. Press q to quit.")
 signal_ready()
