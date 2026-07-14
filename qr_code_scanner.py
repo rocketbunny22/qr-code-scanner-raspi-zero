@@ -1,5 +1,7 @@
 import sys
 import time
+import queue
+import threading
 from urllib.parse import parse_qs, urlparse
 from dotenv import load_dotenv
 import os
@@ -58,6 +60,7 @@ USE_BUZZER = True
 LED_BRIGHTNESS = 1.0
 SUCCESS_HOLD_SECONDS = 5
 RESULT_HOLD_SECONDS = 0.8
+CAMERA_CAPTURE_TIMEOUT_SECONDS = 5
 
 try:
     from gpiozero import PWMLED
@@ -340,6 +343,32 @@ def show_status(text, subtext=""):
     epd.display(epd.getbuffer(image))
 
 
+def capture_camera_frame(timeout=CAMERA_CAPTURE_TIMEOUT_SECONDS):
+    result_queue = queue.Queue(maxsize=1)
+
+    def capture():
+        try:
+            result_queue.put(("frame", picam2.capture_array("main")), block=False)
+        except Exception as e:
+            result_queue.put(("error", e), block=False)
+
+    thread = threading.Thread(target=capture, daemon=True)
+    thread.start()
+
+    try:
+        result_type, result = result_queue.get(timeout=timeout)
+    except queue.Empty as e:
+        raise TimeoutError("Timed out waiting for camera frame") from e
+
+    if result_type == "error":
+        raise result
+
+    if result is None or result.size == 0:
+        raise RuntimeError("Camera returned an empty frame")
+
+    return result
+
+
 # ----------------------------
 # Camera setup
 # ----------------------------
@@ -361,10 +390,7 @@ try:
     # Start continuous autofocus
     picam2.set_controls({"AfMode": 2})
 
-    startup_frame = picam2.capture_array("main")
-
-    if startup_frame is None or startup_frame.size == 0:
-        raise RuntimeError("Camera started but did not return a frame")
+    capture_camera_frame()
 
 except Exception as e:
     hold_startup_failure("STARTUP FAIL", "Camera error", e)
@@ -382,12 +408,9 @@ frame_count = 0
 try:
     while True:
         try:
-            frame = picam2.capture_array("main")
+            frame = capture_camera_frame()
         except Exception as e:
             hold_startup_failure("STARTUP FAIL", "Camera error", e)
-
-        if frame is None or frame.size == 0:
-            hold_startup_failure("STARTUP FAIL", "Camera error")
 
         frame_count += 1
 
