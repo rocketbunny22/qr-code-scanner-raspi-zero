@@ -8,6 +8,7 @@ import os
 import cv2
 from PIL import Image, ImageDraw, ImageFont
 from picamera2 import Picamera2
+from libcamera import controls
 from pyzbar.pyzbar import decode, ZBarSymbol
 import requests
 from pathlib import Path
@@ -389,7 +390,10 @@ try:
     picam2.start()
 
     # Start continuous autofocus
-    picam2.set_controls({"AfMode": 2})
+    picam2.set_controls({
+        "AfMode": controls.AfModeEnum.Manual,
+        "LensPosition": 10.0,
+        })
 
     capture_camera_frame()
 
