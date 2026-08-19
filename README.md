@@ -24,10 +24,10 @@ The scanner continuously captures camera frames, decodes QR codes, sends the bad
 
 1. Starts the Pi camera at 640 x 480 pixels and 30 FPS.
 2. Uses a fixed manual camera lens position of `10.0`.
-3. Reads the luminance plane from the YUV camera frame and tries to decode only QR codes, every third frame.
+3. Continuously captures frames into a one-frame latest-value buffer and decodes QR codes from every frame the processor can consume.
 4. Accepts QR payloads that are URLs containing `company_id` and `attendee` query-string parameters.
 5. Sends those values, plus the configured scanner identifier, to the OFG API using an authenticated JSON `POST` request.
-6. Shows the result on the e-paper display and signals it through the LEDs and buzzer.
+6. Shows the result on the e-paper display and signals it through the LEDs and buzzer without pausing camera capture or QR decoding.
 7. Keeps each decoded payload in memory for the lifetime of the process, so the same QR payload is not submitted twice until the service is restarted.
 
 There is no browser UI or camera preview. The display, LEDs, buzzer, and service logs are the operating interface.
@@ -78,7 +78,6 @@ python3
 python3-venv
 python3-pip
 python3-picamera2
-python3-opencv
 python3-pil
 python3-numpy
 python3-gpiozero
@@ -103,13 +102,18 @@ The e-paper driver comes from the Waveshare [`e-Paper`](https://github.com/waves
 ```text
 Camera frame
     -> YUV luminance plane
-    -> pyzbar QR-only decode (every third frame)
+    -> latest-frame buffer
+    -> pyzbar QR-only decode
     -> parse company_id and attendee from the QR URL
-    -> authenticated POST to OFG API
-    -> LED + buzzer + e-paper result
+    -> one of two authenticated API workers
+    -> non-blocking LED + buzzer + e-paper result
 ```
 
-The program has a five-second timeout around each camera capture. If the camera does not return a usable frame, it enters the startup-failure loop: red LED, failure tone, and `STARTUP FAIL / Camera error` on the display. That loop intentionally remains running, so `systemd` does not restart it automatically; after correcting the fault, restart the service manually.
+Camera capture runs continuously in one persistent worker instead of creating a thread for every frame. Its queue holds only one frame: if QR decoding is temporarily slower than the camera, an old unprocessed frame is replaced by the newest frame instead of building a latency-producing backlog. Resolution remains 640 x 480 and the decoder remains restricted to QR codes.
+
+API requests, buzzer patterns, and e-paper refreshes have independent workers. A slow network response, sound, full e-paper refresh, or five-second success hold therefore does not pause detection of the next badge. Two API workers can process separate badges concurrently, and each worker reuses its HTTP session and underlying connection where the server permits it.
+
+The program allows five seconds for the camera worker to supply a frame. If the camera does not return a usable frame, it enters the startup-failure loop: red LED, failure tone, and `STARTUP FAIL / Camera error` on the display. That loop intentionally remains running, so `systemd` does not restart it automatically; after correcting the fault, restart the service manually.
 
 ### Accepted QR payload format
 
@@ -133,7 +137,7 @@ Missing either parameter produces a local `invalid` result without making an API
 
 ### Duplicate behavior
 
-Every decoded QR payload is added to an in-memory `seen` set before the API request is sent. Once a code has been observed, later scans of the exact same payload during the same process lifetime show `DUPLICATE` and do not call the API.
+Every decoded QR payload is added to an in-memory `seen` set before the API request is queued. A code that remains in the camera view is ignored after its first detection rather than repeatedly generating duplicate sounds and display updates. After it has been absent for at least `QR_REARM_SECONDS`, presenting it again shows one `DUPLICATE` result and does not call the API.
 
 This applies even if the first request returns an error, the API is offline, or the badge is not found. Restart `qrscanner.service` if an operator must submit that same payload again. The set is not persisted, so all codes become eligible again after any restart or reboot.
 
@@ -160,7 +164,7 @@ The request has a 10-second timeout. The response body must be JSON. The scanner
 
 | API/result status | Kiosk result |
 | --- | --- |
-| `checked_in` | Green LED, two rising beeps, `CHECKED IN` with the response `attendee` value. This result remains visible for five seconds. |
+| `checked_in` | Green LED, two rising beeps, `CHECKED IN` with the response `attendee` value. This result is scheduled for up to five seconds without blocking the next scan. |
 | `not_found` | Red LED, low failure tone, `NOT FOUND / See kiosk`. |
 | `invalid` | Red LED, low failure tone, `INVALID QR / Missing data`. |
 | `offline` | Red LED, low failure tone, `OFFLINE / Network error`. This is produced locally for request failures, including timeout. |
@@ -250,9 +254,13 @@ These values live in [`qr_code_scanner.py`](qr_code_scanner.py):
 | `LensPosition` | `10.0` | Fixed manual focus position for Camera Module 3. |
 | `LED_BRIGHTNESS` | `1.0` | PWM LED duty-cycle value. |
 | `BUZZER_VOLUME` | `0.5` | PWM buzzer duty-cycle value. |
-| `SUCCESS_HOLD_SECONDS` | `5` | How long a successful check-in is displayed. |
-| `RESULT_HOLD_SECONDS` | `0.8` | How long non-success scan outcomes are displayed. |
+| `SUCCESS_HOLD_SECONDS` | `5` | Maximum success-feedback hold when a newer scan does not replace it. |
+| `RESULT_HOLD_SECONDS` | `0.8` | Maximum non-success feedback hold when a newer scan does not replace it. |
 | `CAMERA_CAPTURE_TIMEOUT_SECONDS` | `5` | Camera-frame timeout before a startup failure is shown. |
+| `QR_REARM_SECONDS` | `0.4` | Minimum absence interval before the same visible payload counts as a new presentation. |
+| `API_WORKER_COUNT` | `2` | Maximum number of different badge requests processed concurrently. |
+
+The result hold values control feedback duration only. They no longer suspend camera capture or QR decoding.
 
 ## Running the scanner
 
@@ -266,7 +274,7 @@ source .venv/bin/activate
 python qr_code_scanner.py
 ```
 
-The program logs its `.env` path, endpoint value, whether an API key was loaded, e-paper initialization, scanned QR payloads, and HTTP response details. Press `q` to exit when a keyboard and terminal are attached. The process turns off LEDs/buzzer, stops the camera, closes OpenCV resources, and sleeps the e-paper display during normal shutdown.
+The program logs its `.env` path, endpoint value, whether an API key was loaded, e-paper initialization, scanned QR payloads, API outcomes, and per-request completion time. Press `Ctrl+C` to exit when a keyboard and terminal are attached. The process turns off LEDs/buzzer, stops the camera and background workers, and sleeps the e-paper display during normal shutdown.
 
 ### `systemd` service
 
@@ -320,7 +328,7 @@ After changing `scanner_init.sh` or any generated unit value, run `sudo systemct
 | Situation | LED state | Sound | E-paper text |
 | --- | --- | --- | --- |
 | Ready | All off | Two rising startup tones only at launch | `READY / Scan badge QR` initially, then `READY / Scan next badge` |
-| Processing a new QR | Yellow | None before API result | Continues to show prior status while request is in progress |
+| Processing a new QR | Yellow | None before API result | `PROCESSING / Checking badge` |
 | Checked in | Green | Two short rising tones | `CHECKED IN` plus returned attendee value |
 | Duplicate payload | Yellow | One medium tone | `DUPLICATE / Already scanned` |
 | Badge not found | Red | One low long tone | `NOT FOUND / See kiosk` |
@@ -372,7 +380,7 @@ GPIO setup errors are printed as `LEDs disabled:` or `Buzzer disabled:`. Confirm
 ### The API reports offline or unexpected errors
 
 1. Confirm `.env` exists next to the Python script and contains both required non-empty values.
-2. Inspect service logs for the endpoint, HTTP response code, content type, and up to 500 characters of the response body.
+2. Inspect service logs for request exceptions, API outcomes, elapsed request time, and the response body included with malformed-response errors.
 3. Test network/DNS connectivity from the Pi using the actual configured endpoint.
 4. Verify the API accepts `application/json`, `X-Scanner-Token`, and the three JSON fields described in [API contract](#api-contract).
 5. Restart the service before retrying a badge whose first scan failed; the duplicate set prevents automatic resubmission within a running process.
@@ -387,7 +395,7 @@ sudo systemctl restart qrscanner.service
 
 ### Service repeatedly restarts
 
-`Restart=always` restarts the program after every exit, including a normal `q` exit. Review recent logs and service state:
+`Restart=always` restarts the program after every exit, including an interactive `Ctrl+C` exit. Review recent logs and service state:
 
 ```bash
 sudo systemctl status qrscanner.service
@@ -412,10 +420,11 @@ sudo systemctl stop qrscanner.service
 ## Current implementation notes
 
 - The program decodes `ZBarSymbol.QRCODE` only; barcodes and other ZBar symbologies are intentionally ignored.
-- QR decoding runs every third captured frame to reduce CPU work.
+- Camera capture and QR decoding run concurrently. The decoder examines the freshest full-resolution frame available and stale unprocessed frames are discarded.
+- API requests use two persistent-session workers, allowing the next QR to be detected and submitted while another request is still in flight.
 - The client sends one HTTP request per newly seen payload and does not inspect the HTTP status itself if the server returned JSON; its visible outcome is selected from the JSON `status` field.
-- The scanner logs QR contents and API response snippets. Treat `journalctl` access as potentially containing attendee and API-response information.
-- The e-paper display refresh is skipped when the requested text/subtext matches the immediately previous display message, reducing unnecessary full refreshes.
+- The scanner logs QR contents and API result data. Treat `journalctl` access as potentially containing attendee and API-response information.
+- Buzzer sequences and e-paper rendering run outside the scanner loop. The e-paper queue keeps the newest requested status so slow full refreshes cannot delay badge detection.
 - The camera, API configuration, e-paper library path, hardware pin mapping, timing, sound, brightness, focus, and scanner ID are currently source configuration rather than command-line options.
 - This repository does not currently include an automated test suite. On a non-Pi development machine, a safe syntax-only check is:
 

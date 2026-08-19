@@ -28,7 +28,6 @@ sudo apt install -y \
     python3-venv \
     python3-pip \
     python3-picamera2 \
-    python3-opencv \
     python3-pil \
     python3-numpy \
     python3-gpiozero \
@@ -113,7 +112,6 @@ import sys
 sys.path.insert(0, "$EPAPER_LIB")
 
 import requests
-import cv2
 from PIL import Image
 from pyzbar.pyzbar import decode
 from gpiozero import LED, PWMOutputDevice

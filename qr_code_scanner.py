@@ -5,7 +5,6 @@ import threading
 from urllib.parse import parse_qs, urlparse
 from dotenv import load_dotenv
 import os
-import cv2
 from PIL import Image, ImageDraw, ImageFont
 from picamera2 import Picamera2
 from libcamera import controls
@@ -39,7 +38,7 @@ YELLOW_LED_PIN = 6    # physical pin 31
 GREEN_LED_PIN = 16    # physical pin 36
 
 # Passive beeper
-BUZZER_PIN = 13       # physical pin 12
+BUZZER_PIN = 13       # physical pin 33
 
 # Waveshare e-paper wired connector pins
 # These match the normal Waveshare Raspberry Pi SPI wiring:
@@ -63,6 +62,8 @@ BUZZER_VOLUME = 0.5
 SUCCESS_HOLD_SECONDS = 5
 RESULT_HOLD_SECONDS = 0.8
 CAMERA_CAPTURE_TIMEOUT_SECONDS = 5
+QR_REARM_SECONDS = 0.4
+API_WORKER_COUNT = 2
 
 try:
     from gpiozero import PWMLED
@@ -132,7 +133,7 @@ def signal_failure():
     red_led.value = LED_BRIGHTNESS
 
 
-def beep(frequency=1000, duration=0.12):
+def play_tone(frequency=1000, duration=0.12):
     if not USE_BUZZER:
         return
 
@@ -142,18 +143,61 @@ def beep(frequency=1000, duration=0.12):
     buzzer.off()
 
 
-def beep_success():
-    beep(1200, 0.08)
+def play_success_sound():
+    play_tone(1200, 0.08)
     time.sleep(0.02)
-    beep(1600, 0.05)
+    play_tone(1600, 0.05)
 
 
-def beep_failure():
-    beep(350, 0.35)
+def play_failure_sound():
+    play_tone(350, 0.35)
 
 
-def beep_duplicate():
-    beep(900, 0.2)
+def play_duplicate_sound():
+    play_tone(900, 0.2)
+
+
+def play_startup_sound():
+    play_tone(1800, 0.355555)
+    time.sleep(0.02)
+    play_tone(2000, 0.35)
+
+
+sound_queue = queue.Queue()
+sound_stop_event = threading.Event()
+
+
+def sound_worker():
+    sounds = {
+        "startup": play_startup_sound,
+        "success": play_success_sound,
+        "failure": play_failure_sound,
+        "duplicate": play_duplicate_sound,
+    }
+
+    while not sound_stop_event.is_set():
+        sound_name = sound_queue.get()
+
+        if sound_name is None:
+            break
+
+        try:
+            sounds[sound_name]()
+        except Exception as e:
+            print("Buzzer error:", repr(e))
+
+
+sound_thread = threading.Thread(
+    target=sound_worker,
+    name="buzzer-worker",
+    daemon=True,
+)
+sound_thread.start()
+
+
+def queue_sound(sound_name):
+    if USE_BUZZER:
+        sound_queue.put(sound_name)
 
 
 def hold_startup_failure(text, subtext="", error=None):
@@ -163,7 +207,7 @@ def hold_startup_failure(text, subtext="", error=None):
         print("STARTUP ERROR:", repr(error))
 
     signal_failure()
-    beep_failure()
+    queue_sound("failure")
     show_status(text, subtext)
 
     while True:
@@ -183,7 +227,7 @@ def parse_qr_url(qr_data):
     }
 
 
-def send_checkin(qr_data):
+def send_checkin(qr_data, session):
     qr = parse_qr_url(qr_data)
 
     if not qr["company_id"] or not qr["attendee"]:
@@ -194,29 +238,18 @@ def send_checkin(qr_data):
         }
 
     try:
-        response = requests.post(
+        response = session.post(
             API_URL,
             json={
                 "company_id": qr["company_id"],
                 "attendee": qr["attendee"],
                 "scanner_id": SCANNER_ID,
             },
-            headers={
-                "X-Scanner-Token": API_TOKEN,
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "User-Agent": "OFG-QR-Scanner/1.0",
-            },
             timeout=10,
         )
 
-        print("API URL:", API_URL)
-        print("API status:", response.status_code)
-        print("API content-type:", response.headers.get("content-type"))
-        print("API body:", response.text[:500])
-
         try:
-            return response.json()
+            result = response.json()
         except ValueError:
             return {
                 "success": False,
@@ -226,6 +259,17 @@ def send_checkin(qr_data):
                 "body": response.text[:500],
             }
 
+        if not isinstance(result, dict):
+            return {
+                "success": False,
+                "status": "bad_response",
+                "message": "Server returned JSON that was not an object",
+                "http_status": response.status_code,
+                "body": response.text[:500],
+            }
+
+        return result
+
     except requests.RequestException as e:
         print("REQUEST ERROR:", repr(e))
 
@@ -234,6 +278,65 @@ def send_checkin(qr_data):
             "status": "offline",
             "message": str(e),
         }
+
+
+api_request_queue = queue.Queue()
+api_result_queue = queue.Queue()
+api_threads = []
+
+
+def api_worker():
+    with requests.Session() as session:
+        session.headers.update(
+            {
+                "X-Scanner-Token": API_TOKEN,
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "OFG-QR-Scanner/1.0",
+            }
+        )
+
+        while True:
+            request_item = api_request_queue.get()
+
+            if request_item is None:
+                break
+
+            scan_id, qr_data = request_item
+            started_at = time.monotonic()
+
+            try:
+                result = send_checkin(qr_data, session)
+            except Exception as e:
+                print("CHECK-IN ERROR:", repr(e))
+                result = {
+                    "success": False,
+                    "status": "error",
+                    "message": str(e),
+                }
+
+            api_result_queue.put(
+                (scan_id, qr_data, result, time.monotonic() - started_at)
+            )
+
+
+def start_api_workers():
+    for worker_number in range(API_WORKER_COUNT):
+        thread = threading.Thread(
+            target=api_worker,
+            name=f"api-worker-{worker_number + 1}",
+            daemon=True,
+        )
+        thread.start()
+        api_threads.append(thread)
+
+
+def stop_api_workers():
+    for _ in api_threads:
+        api_request_queue.put(None)
+
+    for thread in api_threads:
+        thread.join(timeout=0.5)
 
 
 # ----------------------------
@@ -318,10 +421,8 @@ except Exception as e:
     print("E-paper disabled:", e)
 
 
-def show_status(text, subtext=""):
+def render_status(text, subtext=""):
     global _last_eink_message
-
-    print(f"STATUS: {text} {subtext}")
 
     if not USE_EINK or epd is None:
         return
@@ -345,30 +446,145 @@ def show_status(text, subtext=""):
     epd.display(epd.getbuffer(image))
 
 
-def capture_camera_frame(timeout=CAMERA_CAPTURE_TIMEOUT_SECONDS):
-    result_queue = queue.Queue(maxsize=1)
+display_queue = queue.Queue(maxsize=1)
+display_stop_event = threading.Event()
 
-    def capture():
-        try:
-            result_queue.put(("frame", picam2.capture_array("main")), block=False)
-        except Exception as e:
-            result_queue.put(("error", e), block=False)
 
-    thread = threading.Thread(target=capture, daemon=True)
-    thread.start()
+def replace_queued_item(target_queue, item):
+    try:
+        target_queue.put_nowait(item)
+        return
+    except queue.Full:
+        pass
 
     try:
-        result_type, result = result_queue.get(timeout=timeout)
-    except queue.Empty as e:
-        raise TimeoutError("Timed out waiting for camera frame") from e
+        target_queue.get_nowait()
+    except queue.Empty:
+        pass
 
-    if result_type == "error":
-        raise result
+    try:
+        target_queue.put_nowait(item)
+    except queue.Full:
+        pass
 
-    if result is None or result.size == 0:
-        raise RuntimeError("Camera returned an empty frame")
 
-    return result
+def display_worker():
+    while not display_stop_event.is_set():
+        status_item = display_queue.get()
+
+        if status_item is None:
+            break
+
+        try:
+            render_status(*status_item)
+        except Exception as e:
+            print("E-paper update failed:", repr(e))
+
+
+display_thread = threading.Thread(
+    target=display_worker,
+    name="e-paper-worker",
+    daemon=True,
+)
+display_thread.start()
+
+
+def show_status(text, subtext=""):
+    print(f"STATUS: {text} {subtext}")
+
+    if USE_EINK and epd is not None:
+        replace_queued_item(display_queue, (text, subtext))
+
+
+def stop_display_worker():
+    display_stop_event.set()
+    replace_queued_item(display_queue, None)
+    display_thread.join(timeout=3)
+
+    return not display_thread.is_alive()
+
+
+class LatestFrameCapture:
+    def __init__(self, camera):
+        self.camera = camera
+        self.items = queue.Queue(maxsize=1)
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(
+            target=self.capture_frames,
+            name="camera-capture-worker",
+            daemon=True,
+        )
+
+    def start(self):
+        self.thread.start()
+
+    def capture_frames(self):
+        while not self.stop_event.is_set():
+            try:
+                frame = self.camera.capture_array("main")
+
+                if frame is None or frame.size == 0:
+                    raise RuntimeError("Camera returned an empty frame")
+
+                replace_queued_item(self.items, ("frame", frame))
+            except Exception as e:
+                if not self.stop_event.is_set():
+                    replace_queued_item(self.items, ("error", e))
+                return
+
+    def get_frame(self, timeout=CAMERA_CAPTURE_TIMEOUT_SECONDS):
+        try:
+            result_type, result = self.items.get(timeout=timeout)
+        except queue.Empty as e:
+            raise TimeoutError("Timed out waiting for camera frame") from e
+
+        if result_type == "error":
+            raise result
+
+        return result
+
+    def stop(self):
+        self.stop_event.set()
+
+    def wait(self):
+        self.thread.join(timeout=1)
+
+
+def present_checkin_result(scan_id, result, elapsed_seconds):
+    status = result.get("status")
+
+    print(
+        f"Scan {scan_id} completed in {elapsed_seconds:.3f}s "
+        f"with status {status!r}"
+    )
+
+    if status == "checked_in":
+        print("Checked in:", result)
+        signal_success()
+        queue_sound("success")
+        show_status("CHECKED IN", result.get("attendee", "")[:30])
+        return SUCCESS_HOLD_SECONDS
+
+    signal_failure()
+    queue_sound("failure")
+
+    if status == "not_found":
+        print("Not found:", result)
+        show_status("NOT FOUND", "See kiosk")
+    elif status == "invalid":
+        print("Invalid:", result)
+        show_status("INVALID QR", "Missing data")
+    elif status == "offline":
+        print("Offline:", result)
+        show_status("OFFLINE", "Network error")
+    elif status == "bad_response":
+        print("Bad response:", result)
+        show_status("BAD RESPONSE", str(result.get("http_status", "")))
+    else:
+        print("Error:", result)
+        show_status("ERROR", "See kiosk")
+
+    return RESULT_HOLD_SECONDS
 
 
 # ----------------------------
@@ -376,6 +592,9 @@ def capture_camera_frame(timeout=CAMERA_CAPTURE_TIMEOUT_SECONDS):
 # ----------------------------
 if not API_URL or not API_TOKEN:
     hold_startup_failure("STARTUP FAIL", "Missing API config")
+
+picam2 = None
+camera_capture = None
 
 try:
     picam2 = Picamera2()
@@ -389,121 +608,134 @@ try:
 
     picam2.start()
 
-    # Start continuous autofocus
+    # Use the calibrated fixed-focus position for the kiosk scan distance.
     picam2.set_controls({
         "AfMode": controls.AfModeEnum.Manual,
         "LensPosition": 10.0,
-        })
+    })
 
-    capture_camera_frame()
+    camera_capture = LatestFrameCapture(picam2)
+    camera_capture.start()
+    camera_capture.get_frame()
 
 except Exception as e:
     hold_startup_failure("STARTUP FAIL", "Camera error", e)
 
-print("Scanner started. Press q to quit.")
+start_api_workers()
+
+print("Scanner started. Press Ctrl+C to quit.")
 signal_ready()
-beep(1800, 0.355555)
-time.sleep(0.02)
-beep(2000, 0.35)
+queue_sound("startup")
 show_status("READY", "Scan badge QR")
 
-seen = set()
-frame_count = 0
+seen_payloads = set()
+payload_last_seen = {}
+scan_id = 0
+pending_scans = 0
+feedback_ready_at = 0.0
 
 try:
     while True:
+        while True:
+            try:
+                completed_scan = api_result_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            completed_id, _, result, elapsed_seconds = completed_scan
+            pending_scans = max(0, pending_scans - 1)
+            hold_seconds = present_checkin_result(
+                completed_id,
+                result,
+                elapsed_seconds,
+            )
+            feedback_ready_at = time.monotonic() + hold_seconds
+
+        now = time.monotonic()
+
+        if feedback_ready_at and now >= feedback_ready_at:
+            feedback_ready_at = 0.0
+
+            if pending_scans:
+                signal_processing()
+                show_status("PROCESSING", "Checking badge")
+            else:
+                signal_ready()
+                show_status("READY", "Scan next badge")
+
         try:
-            frame = capture_camera_frame()
+            frame = camera_capture.get_frame()
         except Exception as e:
             hold_startup_failure("STARTUP FAIL", "Camera error", e)
 
-        frame_count += 1
-
         # Extract grayscale plane from YUV420
         gray = frame[:HEIGHT, :WIDTH]
+        codes = decode(gray, symbols=[ZBarSymbol.QRCODE])
+        detected_payloads = {bytes(code.data) for code in codes}
+        now = time.monotonic()
 
-        codes = []
+        for raw_payload in detected_payloads:
+            previous_seen_at = payload_last_seen.get(raw_payload)
+            payload_last_seen[raw_payload] = now
 
-        # Decode every 3rd frame for performance
-        if frame_count % 3 == 0:
-            codes = decode(gray, symbols=[ZBarSymbol.QRCODE])
-
-        for code in codes:
-            data = code.data.decode("utf-8")
-
-            if data in seen:
-                print("Duplicate:", data)
-                signal_processing()
-                beep_duplicate()
-                show_status("DUPLICATE", "Already scanned")
-                time.sleep(RESULT_HOLD_SECONDS)
-                signal_ready()
-                show_status("READY", "Scan next badge")
+            if (
+                previous_seen_at is not None
+                and now - previous_seen_at < QR_REARM_SECONDS
+            ):
                 continue
 
-            seen.add(data)
+            data = raw_payload.decode("utf-8", errors="replace")
 
-            print("QR:", data)
+            if raw_payload in seen_payloads:
+                print("Duplicate:", data)
+                signal_processing()
+                queue_sound("duplicate")
+                show_status("DUPLICATE", "Already scanned")
+                feedback_ready_at = now + RESULT_HOLD_SECONDS
+                continue
+
+            seen_payloads.add(raw_payload)
+            scan_id += 1
+            pending_scans += 1
+
+            print(f"Scan {scan_id} QR:", data)
 
             signal_processing()
+            show_status("PROCESSING", "Checking badge")
+            api_request_queue.put((scan_id, data))
 
-            result = send_checkin(data)
-            status = result.get("status")
-            result_hold_seconds = RESULT_HOLD_SECONDS
+        stale_before = now - (QR_REARM_SECONDS * 4)
+        payload_last_seen = {
+            payload: last_seen_at
+            for payload, last_seen_at in payload_last_seen.items()
+            if last_seen_at >= stale_before
+        }
 
-            if status == "checked_in":
-                print("Checked in:", result)
-                signal_success()
-                beep_success()
-                show_status("CHECKED IN", result.get("attendee", "")[:30])
-                result_hold_seconds = SUCCESS_HOLD_SECONDS
-
-            elif status == "not_found":
-                print("Not found:", result)
-                signal_failure()
-                beep_failure()
-                show_status("NOT FOUND", "See kiosk")
-
-            elif status == "invalid":
-                print("Invalid:", result)
-                signal_failure()
-                beep_failure()
-                show_status("INVALID QR", "Missing data")
-
-            elif status == "offline":
-                print("Offline:", result)
-                signal_failure()
-                beep_failure()
-                show_status("OFFLINE", "Network error")
-
-            elif status == "bad_response":
-                print("Bad response:", result)
-                signal_failure()
-                beep_failure()
-                show_status("BAD RESPONSE", str(result.get("http_status", "")))
-
-            else:
-                print("Error:", result)
-                signal_failure()
-                beep_failure()
-                show_status("ERROR", "See kiosk")
-
-            time.sleep(result_hold_seconds)
-
-            signal_ready()
-            show_status("READY", "Scan next badge")
-
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
+except KeyboardInterrupt:
+    print("Scanner stopping.")
 
 finally:
+    if camera_capture is not None:
+        camera_capture.stop()
+
+    if picam2 is not None:
+        picam2.stop()
+
+    if camera_capture is not None:
+        camera_capture.wait()
+
+    stop_api_workers()
+
+    sound_stop_event.set()
+    sound_queue.put(None)
+    sound_thread.join(timeout=1)
+
     lights_off()
 
     if USE_BUZZER and buzzer is not None:
         buzzer.off()
 
-    picam2.stop()
-    cv2.destroyAllWindows()
+    display_stopped = stop_display_worker()
 
-    if USE_EINK and epd is not None:
+    if USE_EINK and epd is not None and display_stopped:
         epd.sleep()
