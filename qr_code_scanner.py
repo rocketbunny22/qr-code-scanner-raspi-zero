@@ -205,17 +205,20 @@ def signal_success():
     if USE_LIGHTS:
         green_led.value = LED_BRIGHTNESS
 
+    # Brief green flash without blocking the scanner
     strip_set(0, 255, 0)
+    threading.Timer(0.15, strip_off).start()
 
 
 def signal_duplicate():
-    # Duplicate scans are intentionally shown as green.
     traffic_lights_off()
 
     if USE_LIGHTS:
         green_led.value = LED_BRIGHTNESS
 
+    # Brief green flash without blocking the scanner
     strip_set(0, 255, 0)
+    threading.Timer(0.15, strip_off).start())
 
 
 def signal_failure():
