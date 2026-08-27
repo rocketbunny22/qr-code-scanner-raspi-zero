@@ -124,6 +124,10 @@ def strip_set(red, green, blue):
 def strip_off():
     strip_set(0, 0, 0)
 
+def strip_test_marker(name, red, green, blue):
+    print(f"STRIP TEST: {name}")
+    strip_set(red, green, blue)
+    time.sleep(1)
 
 # Turn the strip blue as soon as its driver is ready.
 # It remains blue through camera, e-paper and API worker initialization.
@@ -139,6 +143,7 @@ try:
         initial_value=0,
         frequency=1000,
     )
+    strip_test_marker("after strip init - BLUE", 0, 0, 255)
 
 except Exception as e:
     USE_BUZZER = False
@@ -688,6 +693,7 @@ try:
     camera_capture = LatestFrameCapture(picam2)
     camera_capture.start()
     camera_capture.get_frame()
+    strip_test_marker("after camera - GREEN", 0, 255, 0)
 
 except Exception as e:
     hold_startup_failure("STARTUP FAIL", "Camera error", e)
