@@ -42,7 +42,7 @@ BUZZER_PIN = 13       # physical pin 33
 
 # 5V addressable LED strip
 # DATA -> GPIO21 / physical pin 40
-STRIP_PIN = 21
+STRIP_PIN = 18
 STRIP_LED_COUNT = 60
 STRIP_BRIGHTNESS = 32  # 0-255, about 12.5%
 
