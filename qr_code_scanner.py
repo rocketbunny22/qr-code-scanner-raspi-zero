@@ -86,20 +86,6 @@ except Exception as e:
     green_led = None
     print("LEDs disabled:", e)
 
-
-# Addressable status strip
-try:
-    from rpi_ws281x import PixelStrip, Color
-
-    status_strip = None
-    init_status_strip()
-
-except Exception as e:
-    USE_STRIP = False
-    status_strip = None
-    Color = None
-    print("LED strip disabled:", repr(e))
-
 def init_status_strip():
     global status_strip, USE_STRIP
 
@@ -125,6 +111,21 @@ def init_status_strip():
         USE_STRIP = False
         status_strip = None
         print("LED strip disabled:", repr(e))
+
+# Addressable status strip
+try:
+    from rpi_ws281x import PixelStrip, Color
+
+    status_strip = None
+    init_status_strip()
+
+except Exception as e:
+    USE_STRIP = False
+    status_strip = None
+    Color = None
+    print("LED strip disabled:", repr(e))
+
+
 
 def strip_set(red, green, blue):
     if not USE_STRIP or status_strip is None:
