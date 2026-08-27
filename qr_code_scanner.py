@@ -91,23 +91,40 @@ except Exception as e:
 try:
     from rpi_ws281x import PixelStrip, Color
 
-    status_strip = PixelStrip(
-        STRIP_LED_COUNT,
-        STRIP_PIN,
-        800000,           # signal frequency
-        10,               # DMA channel
-        False,            # invert
-        STRIP_BRIGHTNESS,
-        0,                # channel
-    )
-    status_strip.begin()
+    status_strip = None
+    init_status_strip()
 
 except Exception as e:
     USE_STRIP = False
     status_strip = None
     Color = None
-    print("LED strip disabled:", e)
+    print("LED strip disabled:", repr(e))
 
+def init_status_strip():
+    global status_strip, USE_STRIP
+
+    try:
+        from rpi_ws281x import PixelStrip
+
+        status_strip = PixelStrip(
+            STRIP_LED_COUNT,
+            STRIP_PIN,
+            800000,
+            10,
+            False,
+            STRIP_BRIGHTNESS,
+            0,
+        )
+
+        status_strip.begin()
+        USE_STRIP = True
+
+        print("LED strip initialized")
+
+    except Exception as e:
+        USE_STRIP = False
+        status_strip = None
+        print("LED strip disabled:", repr(e))
 
 def strip_set(red, green, blue):
     if not USE_STRIP or status_strip is None:
@@ -693,7 +710,18 @@ try:
     camera_capture = LatestFrameCapture(picam2)
     camera_capture.start()
     camera_capture.get_frame()
-    strip_test_marker("after camera - GREEN", 0, 255, 0)
+    print("Camera fully initialized")
+
+# Reclaim/reinitialize the WS281x hardware after all other
+# hardware initialization has completed.
+    init_status_strip()
+
+    strip_test_marker(
+        "after hardware init - GREEN",
+        0,
+        255,
+        0,
+    )
 
 except Exception as e:
     hold_startup_failure("STARTUP FAIL", "Camera error", e)
