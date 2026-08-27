@@ -38,7 +38,7 @@ YELLOW_LED_PIN = 6    # physical pin 31
 GREEN_LED_PIN = 16    # physical pin 36
 
 # Passive beeper
-BUZZER_PIN = 13       # physical pin 33
+BUZZER_PIN = 26       # physical pin 33
 
 # 5V addressable LED strip
 # DATA -> GPIO21 / physical pin 40
