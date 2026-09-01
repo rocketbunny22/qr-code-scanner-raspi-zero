@@ -2,7 +2,7 @@ import sys
 import time
 import queue
 import threading
-from urllib.parse import parse_qs, urlparse
+import signal
 from dotenv import load_dotenv
 import os
 from PIL import Image, ImageDraw, ImageFont
@@ -12,6 +12,13 @@ from pyzbar.pyzbar import decode, ZBarSymbol
 import requests
 from pathlib import Path
 
+from scanner_core import (
+    SeenPayloadCache,
+    is_retryable_result,
+    parse_qr_url,
+    payload_fingerprint,
+)
+
 # ----------------------------
 # Project / env setup
 # ----------------------------
@@ -20,10 +27,10 @@ load_dotenv(BASE_DIR / ".env")
 
 API_URL = os.getenv("OFG_URL")
 API_TOKEN = os.getenv("OFG_API_KEY")
-SCANNER_ID = "scanner-1"
+SCANNER_ID = os.getenv("OFG_SCANNER_ID", "scanner-1")
 
 print("ENV path:", BASE_DIR / ".env")
-print("URL:", repr(API_URL))
+print("API URL loaded:", bool(API_URL))
 print("KEY loaded:", bool(API_TOKEN))
 
 
@@ -64,6 +71,36 @@ RESULT_HOLD_SECONDS = 0.8
 CAMERA_CAPTURE_TIMEOUT_SECONDS = 5
 QR_REARM_SECONDS = 0.4
 API_WORKER_COUNT = 2
+API_QUEUE_SIZE = 20
+SOUND_QUEUE_SIZE = 4
+SEEN_PAYLOAD_LIMIT = 10_000
+SEEN_PAYLOAD_TTL_SECONDS = 24 * 60 * 60
+STARTUP_FAILURE_RETRY_SECONDS = 10
+
+shutdown_event = threading.Event()
+
+
+class StartupFailure(RuntimeError):
+    """A fatal scanner fault that should let the service supervisor restart us."""
+
+
+def replace_queued_item(target_queue, item):
+    """Put the newest item in a bounded queue, discarding one stale item if needed."""
+    try:
+        target_queue.put_nowait(item)
+        return
+    except queue.Full:
+        pass
+
+    try:
+        target_queue.get_nowait()
+    except queue.Empty:
+        pass
+
+    try:
+        target_queue.put_nowait(item)
+    except queue.Full:
+        pass
 
 try:
     from gpiozero import PWMLED
@@ -163,7 +200,7 @@ def play_startup_sound():
     play_tone(2000, 0.35)
 
 
-sound_queue = queue.Queue()
+sound_queue = queue.Queue(maxsize=SOUND_QUEUE_SIZE)
 sound_stop_event = threading.Event()
 
 
@@ -197,7 +234,7 @@ sound_thread.start()
 
 def queue_sound(sound_name):
     if USE_BUZZER:
-        sound_queue.put(sound_name)
+        replace_queued_item(sound_queue, sound_name)
 
 
 def hold_startup_failure(text, subtext="", error=None):
@@ -210,23 +247,15 @@ def hold_startup_failure(text, subtext="", error=None):
     queue_sound("failure")
     show_status(text, subtext)
 
-    while True:
-        time.sleep(60)
+    if shutdown_event.wait(STARTUP_FAILURE_RETRY_SECONDS):
+        raise KeyboardInterrupt
+
+    raise StartupFailure(f"{text}: {subtext}")
 
 
 # ----------------------------
 # QR/API helpers
 # ----------------------------
-def parse_qr_url(qr_data):
-    parsed = urlparse(qr_data)
-    params = parse_qs(parsed.query)
-
-    return {
-        "company_id": params.get("company_id", [""])[0],
-        "attendee": params.get("attendee", [""])[0],
-    }
-
-
 def send_checkin(qr_data, session):
     qr = parse_qr_url(qr_data)
 
@@ -280,7 +309,7 @@ def send_checkin(qr_data, session):
         }
 
 
-api_request_queue = queue.Queue()
+api_request_queue = queue.Queue(maxsize=API_QUEUE_SIZE)
 api_result_queue = queue.Queue()
 api_threads = []
 
@@ -302,7 +331,7 @@ def api_worker():
             if request_item is None:
                 break
 
-            scan_id, qr_data = request_item
+            scan_id, qr_data, raw_payload = request_item
             started_at = time.monotonic()
 
             try:
@@ -316,7 +345,12 @@ def api_worker():
                 }
 
             api_result_queue.put(
-                (scan_id, qr_data, result, time.monotonic() - started_at)
+                (
+                    scan_id,
+                    raw_payload,
+                    result,
+                    time.monotonic() - started_at,
+                )
             )
 
 
@@ -332,6 +366,13 @@ def start_api_workers():
 
 
 def stop_api_workers():
+    # Do not wait for stale queued scans during service shutdown.
+    while True:
+        try:
+            api_request_queue.get_nowait()
+        except queue.Empty:
+            break
+
     for _ in api_threads:
         api_request_queue.put(None)
 
@@ -355,7 +396,10 @@ EINK_WIDTH = 250
 EINK_HEIGHT = 122
 _last_eink_message = None
 
-EPAPER_LIB = "/home/viztech/e-Paper/RaspberryPi_JetsonNano/python/lib"
+EPAPER_LIB = os.getenv(
+    "EPAPER_LIB",
+    str(Path.home() / "e-Paper/RaspberryPi_JetsonNano/python/lib"),
+)
 
 if EPAPER_LIB not in sys.path:
     sys.path.append(EPAPER_LIB)
@@ -433,8 +477,6 @@ def render_status(text, subtext=""):
     if message_key == _last_eink_message:
         return
 
-    _last_eink_message = message_key
-
     image = Image.new("1", (EINK_WIDTH, EINK_HEIGHT), 255)
     draw = ImageDraw.Draw(image)
 
@@ -444,28 +486,11 @@ def render_status(text, subtext=""):
         draw.text((10, 65), subtext[:30], font=font_small, fill=0)
 
     epd.display(epd.getbuffer(image))
+    _last_eink_message = message_key
 
 
 display_queue = queue.Queue(maxsize=1)
 display_stop_event = threading.Event()
-
-
-def replace_queued_item(target_queue, item):
-    try:
-        target_queue.put_nowait(item)
-        return
-    except queue.Full:
-        pass
-
-    try:
-        target_queue.get_nowait()
-    except queue.Empty:
-        pass
-
-    try:
-        target_queue.put_nowait(item)
-    except queue.Full:
-        pass
 
 
 def display_worker():
@@ -559,183 +584,231 @@ def present_checkin_result(scan_id, result, elapsed_seconds):
     )
 
     if status == "checked_in":
-        print("Checked in:", result)
+        print(f"Scan {scan_id} checked in")
         signal_success()
         queue_sound("success")
-        show_status("CHECKED IN", result.get("attendee", "")[:30])
+        attendee = str(result.get("attendee") or "")[:30]
+        show_status("CHECKED IN", attendee)
         return SUCCESS_HOLD_SECONDS
 
     signal_failure()
     queue_sound("failure")
 
     if status == "not_found":
-        print("Not found:", result)
+        print(f"Scan {scan_id} was not found")
         show_status("NOT FOUND", "See kiosk")
     elif status == "invalid":
-        print("Invalid:", result)
+        print(f"Scan {scan_id} contained invalid badge data")
         show_status("INVALID QR", "Missing data")
     elif status == "offline":
-        print("Offline:", result)
+        print(f"Scan {scan_id} could not reach the API")
         show_status("OFFLINE", "Network error")
     elif status == "bad_response":
-        print("Bad response:", result)
+        print(f"Scan {scan_id} received an invalid API response")
         show_status("BAD RESPONSE", str(result.get("http_status", "")))
+    elif status == "busy":
+        print(f"Scan {scan_id} was rejected because the request queue is full")
+        show_status("BUSY", "Try badge again")
     else:
-        print("Error:", result)
+        print(f"Scan {scan_id} returned unexpected status {status!r}")
         show_status("ERROR", "See kiosk")
 
     return RESULT_HOLD_SECONDS
 
 
 # ----------------------------
-# Camera setup
+# Camera / scanner lifecycle
 # ----------------------------
-if not API_URL or not API_TOKEN:
-    hold_startup_failure("STARTUP FAIL", "Missing API config")
+def request_shutdown(signum, _frame):
+    print(f"Received signal {signum}; scanner stopping.")
+    shutdown_event.set()
 
-picam2 = None
-camera_capture = None
 
-try:
-    picam2 = Picamera2()
+def main():
+    signal.signal(signal.SIGTERM, request_shutdown)
+    signal.signal(signal.SIGINT, request_shutdown)
 
-    picam2.configure(
-        picam2.create_video_configuration(
-            main={"format": "YUV420", "size": (WIDTH, HEIGHT)},
-            controls={"FrameRate": 30},
-        )
-    )
+    picam2 = None
+    camera_capture = None
+    exit_code = 0
 
-    picam2.start()
-
-    # Use the calibrated fixed-focus position for the kiosk scan distance.
-    picam2.set_controls({
-        "AfMode": controls.AfModeEnum.Manual,
-        "LensPosition": 10.0,
-    })
-
-    camera_capture = LatestFrameCapture(picam2)
-    camera_capture.start()
-    camera_capture.get_frame()
-
-except Exception as e:
-    hold_startup_failure("STARTUP FAIL", "Camera error", e)
-
-start_api_workers()
-
-print("Scanner started. Press Ctrl+C to quit.")
-signal_ready()
-queue_sound("startup")
-show_status("READY", "Scan badge QR")
-
-seen_payloads = set()
-payload_last_seen = {}
-scan_id = 0
-pending_scans = 0
-feedback_ready_at = 0.0
-
-try:
-    while True:
-        while True:
-            try:
-                completed_scan = api_result_queue.get_nowait()
-            except queue.Empty:
-                break
-
-            completed_id, _, result, elapsed_seconds = completed_scan
-            pending_scans = max(0, pending_scans - 1)
-            hold_seconds = present_checkin_result(
-                completed_id,
-                result,
-                elapsed_seconds,
-            )
-            feedback_ready_at = time.monotonic() + hold_seconds
-
-        now = time.monotonic()
-
-        if feedback_ready_at and now >= feedback_ready_at:
-            feedback_ready_at = 0.0
-
-            if pending_scans:
-                signal_processing()
-                show_status("PROCESSING", "Checking badge")
-            else:
-                signal_ready()
-                show_status("READY", "Scan next badge")
+    try:
+        if not API_URL or not API_TOKEN:
+            hold_startup_failure("STARTUP FAIL", "Missing API config")
 
         try:
-            frame = camera_capture.get_frame()
+            picam2 = Picamera2()
+
+            picam2.configure(
+                picam2.create_video_configuration(
+                    main={"format": "YUV420", "size": (WIDTH, HEIGHT)},
+                    controls={"FrameRate": 30},
+                )
+            )
+
+            picam2.start()
+
+            # Use the calibrated fixed-focus position for the kiosk scan distance.
+            picam2.set_controls({
+                "AfMode": controls.AfModeEnum.Manual,
+                "LensPosition": 10.0,
+            })
+
+            camera_capture = LatestFrameCapture(picam2)
+            camera_capture.start()
+            camera_capture.get_frame()
+
         except Exception as e:
             hold_startup_failure("STARTUP FAIL", "Camera error", e)
 
-        # Extract grayscale plane from YUV420
-        gray = frame[:HEIGHT, :WIDTH]
-        codes = decode(gray, symbols=[ZBarSymbol.QRCODE])
-        detected_payloads = {bytes(code.data) for code in codes}
-        now = time.monotonic()
+        start_api_workers()
 
-        for raw_payload in detected_payloads:
-            previous_seen_at = payload_last_seen.get(raw_payload)
-            payload_last_seen[raw_payload] = now
+        print("Scanner started. Press Ctrl+C to quit.")
+        signal_ready()
+        queue_sound("startup")
+        show_status("READY", "Scan badge QR")
 
-            if (
-                previous_seen_at is not None
-                and now - previous_seen_at < QR_REARM_SECONDS
-            ):
-                continue
+        seen_payloads = SeenPayloadCache(
+            max_entries=SEEN_PAYLOAD_LIMIT,
+            ttl_seconds=SEEN_PAYLOAD_TTL_SECONDS,
+        )
+        payload_last_seen = {}
+        scan_id = 0
+        pending_scans = 0
+        feedback_ready_at = 0.0
 
-            data = raw_payload.decode("utf-8", errors="replace")
+        while not shutdown_event.is_set():
+            while True:
+                try:
+                    completed_scan = api_result_queue.get_nowait()
+                except queue.Empty:
+                    break
 
-            if raw_payload in seen_payloads:
-                print("Duplicate:", data)
+                completed_id, raw_payload, result, elapsed_seconds = completed_scan
+                pending_scans = max(0, pending_scans - 1)
+
+                # Transport/protocol failures are safe to retry after the badge
+                # leaves the camera view. Definitive API outcomes remain deduped.
+                if is_retryable_result(result):
+                    seen_payloads.discard(raw_payload)
+
+                hold_seconds = present_checkin_result(
+                    completed_id,
+                    result,
+                    elapsed_seconds,
+                )
+                feedback_ready_at = time.monotonic() + hold_seconds
+
+            now = time.monotonic()
+
+            if feedback_ready_at and now >= feedback_ready_at:
+                feedback_ready_at = 0.0
+
+                if pending_scans:
+                    signal_processing()
+                    show_status("PROCESSING", "Checking badge")
+                else:
+                    signal_ready()
+                    show_status("READY", "Scan next badge")
+
+            try:
+                frame = camera_capture.get_frame()
+            except Exception as e:
+                hold_startup_failure("STARTUP FAIL", "Camera error", e)
+
+            if shutdown_event.is_set():
+                break
+
+            # Extract grayscale plane from YUV420
+            gray = frame[:HEIGHT, :WIDTH]
+            codes = decode(gray, symbols=[ZBarSymbol.QRCODE])
+            detected_payloads = {bytes(code.data) for code in codes}
+            now = time.monotonic()
+            seen_payloads.prune(now)
+
+            for raw_payload in detected_payloads:
+                previous_seen_at = payload_last_seen.get(raw_payload)
+                payload_last_seen[raw_payload] = now
+
+                if (
+                    previous_seen_at is not None
+                    and now - previous_seen_at < QR_REARM_SECONDS
+                ):
+                    continue
+
+                data = raw_payload.decode("utf-8", errors="replace")
+                fingerprint = payload_fingerprint(raw_payload)
+
+                if raw_payload in seen_payloads:
+                    print(f"Duplicate QR {fingerprint}")
+                    signal_processing()
+                    queue_sound("duplicate")
+                    show_status("DUPLICATE", "Already scanned")
+                    feedback_ready_at = now + RESULT_HOLD_SECONDS
+                    continue
+
+                scan_id += 1
+                seen_payloads.add(raw_payload, now)
+
+                try:
+                    api_request_queue.put_nowait((scan_id, data, raw_payload))
+                except queue.Full:
+                    seen_payloads.discard(raw_payload)
+                    result = {"status": "busy", "success": False}
+                    hold_seconds = present_checkin_result(scan_id, result, 0.0)
+                    feedback_ready_at = now + hold_seconds
+                    continue
+
+                pending_scans += 1
+                print(f"Scan {scan_id} QR {fingerprint}")
                 signal_processing()
-                queue_sound("duplicate")
-                show_status("DUPLICATE", "Already scanned")
-                feedback_ready_at = now + RESULT_HOLD_SECONDS
-                continue
+                show_status("PROCESSING", "Checking badge")
 
-            seen_payloads.add(raw_payload)
-            scan_id += 1
-            pending_scans += 1
+            stale_before = now - (QR_REARM_SECONDS * 4)
+            payload_last_seen = {
+                payload: last_seen_at
+                for payload, last_seen_at in payload_last_seen.items()
+                if last_seen_at >= stale_before
+            }
 
-            print(f"Scan {scan_id} QR:", data)
+    except KeyboardInterrupt:
+        shutdown_event.set()
+    except StartupFailure as e:
+        print(f"Scanner exiting for supervisor restart: {e}")
+        exit_code = 1
+    finally:
+        print("Scanner stopping.")
 
-            signal_processing()
-            show_status("PROCESSING", "Checking badge")
-            api_request_queue.put((scan_id, data))
+        if camera_capture is not None:
+            camera_capture.stop()
 
-        stale_before = now - (QR_REARM_SECONDS * 4)
-        payload_last_seen = {
-            payload: last_seen_at
-            for payload, last_seen_at in payload_last_seen.items()
-            if last_seen_at >= stale_before
-        }
+        if picam2 is not None:
+            try:
+                picam2.stop()
+            except Exception as e:
+                print("Camera shutdown error:", repr(e))
 
-except KeyboardInterrupt:
-    print("Scanner stopping.")
+        if camera_capture is not None:
+            camera_capture.wait()
 
-finally:
-    if camera_capture is not None:
-        camera_capture.stop()
+        stop_api_workers()
 
-    if picam2 is not None:
-        picam2.stop()
+        sound_stop_event.set()
+        replace_queued_item(sound_queue, None)
+        sound_thread.join(timeout=1)
 
-    if camera_capture is not None:
-        camera_capture.wait()
+        lights_off()
 
-    stop_api_workers()
+        if USE_BUZZER and buzzer is not None:
+            buzzer.off()
 
-    sound_stop_event.set()
-    sound_queue.put(None)
-    sound_thread.join(timeout=1)
+        display_stopped = stop_display_worker()
 
-    lights_off()
+        if USE_EINK and epd is not None and display_stopped:
+            epd.sleep()
 
-    if USE_BUZZER and buzzer is not None:
-        buzzer.off()
+    return exit_code
 
-    display_stopped = stop_display_worker()
 
-    if USE_EINK and epd is not None and display_stopped:
-        epd.sleep()
+if __name__ == "__main__":
+    sys.exit(main())

@@ -28,7 +28,7 @@ The scanner continuously captures camera frames, decodes QR codes, sends the bad
 4. Accepts QR payloads that are URLs containing `company_id` and `attendee` query-string parameters.
 5. Sends those values, plus the configured scanner identifier, to the OFG API using an authenticated JSON `POST` request.
 6. Shows the result on the e-paper display and signals it through the LEDs and buzzer without pausing camera capture or QR decoding.
-7. Keeps each decoded payload in memory for the lifetime of the process, so the same QR payload is not submitted twice until the service is restarted.
+7. Keeps successful and definitive badge outcomes in a bounded 24-hour in-memory history so the same QR payload is not repeatedly submitted.
 
 There is no browser UI or camera preview. The display, LEDs, buzzer, and service logs are the operating interface.
 
@@ -113,7 +113,7 @@ Camera capture runs continuously in one persistent worker instead of creating a 
 
 API requests, buzzer patterns, and e-paper refreshes have independent workers. A slow network response, sound, full e-paper refresh, or five-second success hold therefore does not pause detection of the next badge. Two API workers can process separate badges concurrently, and each worker reuses its HTTP session and underlying connection where the server permits it.
 
-The program allows five seconds for the camera worker to supply a frame. If the camera does not return a usable frame, it enters the startup-failure loop: red LED, failure tone, and `STARTUP FAIL / Camera error` on the display. That loop intentionally remains running, so `systemd` does not restart it automatically; after correcting the fault, restart the service manually.
+The program allows five seconds for the camera worker to supply a frame. If the camera does not return a usable frame, it shows a red LED, failure tone, and `STARTUP FAIL / Camera error` for ten seconds before exiting with an error. The installed `systemd` service can then restart it automatically.
 
 ### Accepted QR payload format
 
@@ -137,9 +137,9 @@ Missing either parameter produces a local `invalid` result without making an API
 
 ### Duplicate behavior
 
-Every decoded QR payload is added to an in-memory `seen` set before the API request is queued. A code that remains in the camera view is ignored after its first detection rather than repeatedly generating duplicate sounds and display updates. After it has been absent for at least `QR_REARM_SECONDS`, presenting it again shows one `DUPLICATE` result and does not call the API.
+Every queued QR payload is added to a bounded in-memory history. A code that remains in the camera view is ignored after its first detection rather than repeatedly generating duplicate sounds and display updates. After it has been absent for at least `QR_REARM_SECONDS`, presenting it again shows one `DUPLICATE` result and does not call the API.
 
-This applies even if the first request returns an error, the API is offline, or the badge is not found. Restart `qrscanner.service` if an operator must submit that same payload again. The set is not persisted, so all codes become eligible again after any restart or reboot.
+Definitive outcomes such as `checked_in`, `not_found`, and `invalid` remain deduplicated for up to 24 hours, with a maximum history of 10,000 payloads. Transport and protocol failures (`offline`, `bad_response`, or an internal request error) are removed from the history, so the operator can remove and present the badge again. The history is not persisted, so all codes become eligible after a restart or reboot.
 
 ## API contract
 
@@ -148,6 +148,8 @@ Set the endpoint and authentication secret in `.env`:
 ```dotenv
 OFG_URL=https://your-api.example/check-in
 OFG_API_KEY=replace-with-scanner-secret
+# Optional: defaults to scanner-1
+OFG_SCANNER_ID=scanner-1
 ```
 
 For each valid QR URL, the scanner sends:
@@ -169,15 +171,16 @@ The request has a 10-second timeout. The response body must be JSON. The scanner
 | `invalid` | Red LED, low failure tone, `INVALID QR / Missing data`. |
 | `offline` | Red LED, low failure tone, `OFFLINE / Network error`. This is produced locally for request failures, including timeout. |
 | `bad_response` | Red LED, low failure tone, `BAD RESPONSE` with the HTTP status. This is produced locally when a response is not JSON. |
+| `busy` | Red LED, low failure tone, `BUSY / Try badge again`. This is produced locally if the bounded request queue is full. |
 | Any other or absent status | Red LED, low failure tone, `ERROR / See kiosk`. |
 
 For successful check-ins, the API should return the attendee name/value in an `attendee` property if it should appear on the display. The display shows at most 30 characters of a subtext value.
 
 ## Installation
 
-### 1. Place the project at its configured path
+### 1. Place the project
 
-The current setup script and scanner code are intentionally configured for the `viztech` deployment account and expect this checkout location:
+The setup script derives the project path from its own location, so the checkout can live under any non-root deployment account. For example:
 
 ```text
 /home/viztech/qr-code-scanner-raspi-zero/
@@ -193,7 +196,7 @@ chmod +x scanner_init.sh
 ./scanner_init.sh
 ```
 
-Run the script as the intended non-root account (for example, `viztech`). It uses `sudo` only for system packages, SPI/SSH configuration, service installation, and ownership changes. It prompts for `OFG_URL` and `OFG_API_KEY` only when `.env` does not already exist.
+Run the script as the intended non-root account (for example, `viztech`). It uses `sudo` only for system packages, SPI configuration, service installation, and ownership changes. It prompts for `OFG_URL` and `OFG_API_KEY` only when `.env` does not already exist. SSH is left unchanged by default; run `ENABLE_SSH=1 ./scanner_init.sh` if the installer should enable it.
 
 ### 2. What `scanner_init.sh` changes
 
@@ -201,7 +204,7 @@ The setup script:
 
 1. Updates APT package metadata and installs the required OS packages.
 2. Enables SPI with `raspi-config`.
-3. Enables and starts SSH.
+3. Optionally enables and starts SSH when `ENABLE_SSH=1` is supplied.
 4. Clones or fast-forwards the Waveshare `e-Paper` repository at `~/e-Paper`.
 5. Creates `.venv` with `--system-site-packages`.
 6. Installs the Python-only dependencies into that environment.
@@ -218,13 +221,13 @@ sudo reboot
 
 ### 3. Using another account or directory
 
-The installer dynamically clones the Waveshare repository under the executing user's home directory, but `qr_code_scanner.py` currently imports it from the fixed path below:
+The installer clones the Waveshare repository under the executing user's home directory. The scanner derives the corresponding library path from the service user's home directory:
 
 ```text
-/home/viztech/e-Paper/RaspberryPi_JetsonNano/python/lib
+~/e-Paper/RaspberryPi_JetsonNano/python/lib
 ```
 
-Therefore, the present code works as documented when the project is installed for `viztech`. Before deploying under another user or at another project path, update both `PROJECT_DIR` in `scanner_init.sh` and `EPAPER_LIB` in `qr_code_scanner.py`, then reinstall or reload the service. Do not assume that changing only one path is sufficient.
+Set the optional `EPAPER_LIB` environment variable if the Waveshare library lives elsewhere. Re-run the installer after moving an existing checkout so it regenerates the systemd unit with the new path.
 
 ## Configuration
 
@@ -238,9 +241,12 @@ OFG_URL=https://your-api.example/check-in
 
 # Required: value sent in the X-Scanner-Token request header
 OFG_API_KEY=replace-with-a-secret
+
+# Optional: unique identifier for this physical kiosk
+OFG_SCANNER_ID=scanner-1
 ```
 
-On boot, missing either value produces `STARTUP FAIL / Missing API config` and holds that condition until the process is restarted with valid configuration. Because this is a running failure loop rather than a process exit, correct the file and manually restart the service.
+On boot, missing either value produces `STARTUP FAIL / Missing API config` for ten seconds and then exits with an error. The installed service retries automatically; correct the file and restart the service to apply it immediately.
 
 ### Code-level settings
 
@@ -259,6 +265,11 @@ These values live in [`qr_code_scanner.py`](qr_code_scanner.py):
 | `CAMERA_CAPTURE_TIMEOUT_SECONDS` | `5` | Camera-frame timeout before a startup failure is shown. |
 | `QR_REARM_SECONDS` | `0.4` | Minimum absence interval before the same visible payload counts as a new presentation. |
 | `API_WORKER_COUNT` | `2` | Maximum number of different badge requests processed concurrently. |
+| `API_QUEUE_SIZE` | `20` | Maximum number of requests waiting behind the API workers. |
+| `SEEN_PAYLOAD_LIMIT` | `10000` | Maximum number of definitive badge outcomes retained. |
+| `SEEN_PAYLOAD_TTL_SECONDS` | `86400` | How long definitive badge outcomes remain deduplicated. |
+
+`SCANNER_ID` can be overridden without changing source by setting `OFG_SCANNER_ID` in `.env`.
 
 The result hold values control feedback duration only. They no longer suspend camera capture or QR decoding.
 
@@ -274,7 +285,7 @@ source .venv/bin/activate
 python qr_code_scanner.py
 ```
 
-The program logs its `.env` path, endpoint value, whether an API key was loaded, e-paper initialization, scanned QR payloads, API outcomes, and per-request completion time. Press `Ctrl+C` to exit when a keyboard and terminal are attached. The process turns off LEDs/buzzer, stops the camera and background workers, and sleeps the e-paper display during normal shutdown.
+The program logs its `.env` path, whether the API URL and key were loaded, e-paper initialization, non-reversible QR fingerprints, API outcomes, and per-request completion time. Press `Ctrl+C` to exit when a keyboard and terminal are attached. The process turns off LEDs/buzzer, stops the camera and background workers, and sleeps the e-paper display during normal shutdown.
 
 ### `systemd` service
 
@@ -366,7 +377,7 @@ The program prints `E-paper disabled:` followed by the import or initialization 
 1. SPI is enabled: `sudo raspi-config nonint get_spi` should report enabled.
 2. The display is specifically a Waveshare 2.13-inch V4 compatible with `epd2in13_V4`.
 3. SPI wires use the pin table above and the display has 3.3 V power and common ground.
-4. The Waveshare repository exists under `/home/viztech/e-Paper` for the current code.
+4. The Waveshare repository exists under the service user's `~/e-Paper` directory, or `EPAPER_LIB` points to its Python library.
 5. The driver directory contains `waveshare_epd`:
 
    ```bash
@@ -380,14 +391,14 @@ GPIO setup errors are printed as `LEDs disabled:` or `Buzzer disabled:`. Confirm
 ### The API reports offline or unexpected errors
 
 1. Confirm `.env` exists next to the Python script and contains both required non-empty values.
-2. Inspect service logs for request exceptions, API outcomes, elapsed request time, and the response body included with malformed-response errors.
+2. Inspect service logs for request exceptions, API outcomes, and elapsed request time.
 3. Test network/DNS connectivity from the Pi using the actual configured endpoint.
 4. Verify the API accepts `application/json`, `X-Scanner-Token`, and the three JSON fields described in [API contract](#api-contract).
-5. Restart the service before retrying a badge whose first scan failed; the duplicate set prevents automatic resubmission within a running process.
+5. For an offline or malformed-response failure, remove the badge from view briefly and present it again. Definitive API outcomes remain deduplicated.
 
 ### A badge should be retried
 
-The scanner deliberately suppresses the same decoded payload after its first detection. Restart the service to clear its in-memory duplicate history:
+The scanner deliberately suppresses definitive outcomes for up to 24 hours. Restart the service when an operator must clear its in-memory duplicate history immediately:
 
 ```bash
 sudo systemctl restart qrscanner.service
@@ -413,7 +424,10 @@ sudo systemctl stop qrscanner.service
 ```text
 .
 ├── qr_code_scanner.py  # Scanner application: camera, decoding, API, GPIO, e-paper
+├── scanner_core.py     # Hardware-independent parsing and duplicate-history helpers
 ├── scanner_init.sh     # Raspberry Pi provisioning and systemd installation
+├── requirements.txt    # Python dependency constraints
+├── tests/              # Hardware-independent unit tests
 └── README.md           # Deployment and operations documentation
 ```
 
@@ -423,13 +437,15 @@ sudo systemctl stop qrscanner.service
 - Camera capture and QR decoding run concurrently. The decoder examines the freshest full-resolution frame available and stale unprocessed frames are discarded.
 - API requests use two persistent-session workers, allowing the next QR to be detected and submitted while another request is still in flight.
 - The client sends one HTTP request per newly seen payload and does not inspect the HTTP status itself if the server returned JSON; its visible outcome is selected from the JSON `status` field.
-- The scanner logs QR contents and API result data. Treat `journalctl` access as potentially containing attendee and API-response information.
+- The scanner logs a short SHA-256 fingerprint instead of raw QR contents or complete API results. Successful attendee values are still shown on the physical display.
 - Buzzer sequences and e-paper rendering run outside the scanner loop. The e-paper queue keeps the newest requested status so slow full refreshes cannot delay badge detection.
-- The camera, API configuration, e-paper library path, hardware pin mapping, timing, sound, brightness, focus, and scanner ID are currently source configuration rather than command-line options.
-- This repository does not currently include an automated test suite. On a non-Pi development machine, a safe syntax-only check is:
+- API credentials, scanner ID, and an optional e-paper library override come from `.env`; camera settings, hardware pins, timing, sound, brightness, and focus remain source configuration.
+- Hardware-independent helpers have a standard-library unit test suite. Run it on a development machine with:
 
   ```bash
-  python3 -m py_compile qr_code_scanner.py
+  python3 -m unittest discover -s tests -v
   ```
+
+  A safe syntax-only check for the complete hardware runtime is `python3 -m py_compile qr_code_scanner.py scanner_core.py`.
 
   Running the scanner itself requires Raspberry Pi camera/GPIO/e-paper dependencies and attached hardware.

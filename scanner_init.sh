@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="/home/viztech/qr-code-scanner-raspi-zero/"
+PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/"
 PROJECT_USER="${SUDO_USER:-$USER}"
 PROJECT_HOME="$(getent passwd "$PROJECT_USER" | cut -d: -f6)"
+ENABLE_SSH="${ENABLE_SSH:-0}"
 
 VENV_DIR="$PROJECT_DIR/.venv"
 SCANNER_SCRIPT="$PROJECT_DIR/qr_code_scanner.py"
@@ -38,15 +39,20 @@ sudo apt install -y \
 
 echo "Enabling SPI..."
 sudo raspi-config nonint do_spi 0 || true
-echo "Enabling SSH..."
-sudo systemctl enable ssh
-sudo systemctl start ssh
+
+if [[ "$ENABLE_SSH" == "1" ]]; then
+    echo "Enabling SSH..."
+    sudo systemctl enable ssh
+    sudo systemctl start ssh
+else
+    echo "Leaving SSH unchanged. Set ENABLE_SSH=1 to enable it."
+fi
 
 echo "Installing Waveshare e-Paper library..."
 if [[ ! -d "$EPAPER_DIR" ]]; then
     git clone https://github.com/waveshareteam/e-Paper.git "$EPAPER_DIR"
 else
-    git -C "$EPAPER_DIR" pull --ff-only || true
+    git -C "$EPAPER_DIR" pull --ff-only
 fi
 
 sudo chown -R "$PROJECT_USER:$PROJECT_USER" "$EPAPER_DIR"
@@ -61,10 +67,7 @@ python3 -m venv --system-site-packages "$VENV_DIR"
 
 echo "Installing Python packages..."
 "$VENV_DIR/bin/python" -m pip install --upgrade pip
-"$VENV_DIR/bin/python" -m pip install \
-    requests \
-    python-dotenv \
-    pyzbar
+"$VENV_DIR/bin/python" -m pip install -r "$PROJECT_DIR/requirements.txt"
 
 if [[ ! -f "$PROJECT_DIR/.env" ]]; then
     echo "Creating .env..."
@@ -98,6 +101,7 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=$VENV_DIR/bin/python -u $SCANNER_SCRIPT
 Restart=always
 RestartSec=5
+TimeoutStopSec=20
 
 [Install]
 WantedBy=multi-user.target
