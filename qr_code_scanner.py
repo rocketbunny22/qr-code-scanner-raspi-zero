@@ -52,6 +52,7 @@ BUZZER_PIN = 26       # physical pin 37
 STRIP_PIN = 18
 STRIP_LED_COUNT = 60
 STRIP_BRIGHTNESS = 32  # 0-255, about 12.5%
+STRIP_FLASH_SECONDS = 1.0
 
 # Waveshare e-paper wired connector pins
 # These match the normal Waveshare Raspberry Pi SPI wiring:
@@ -85,6 +86,8 @@ SEEN_PAYLOAD_TTL_SECONDS = 24 * 60 * 60
 STARTUP_FAILURE_RETRY_SECONDS = 10
 
 shutdown_event = threading.Event()
+strip_lock = threading.Lock()
+strip_generation = 0
 
 
 class StartupFailure(RuntimeError):
@@ -167,19 +170,52 @@ except Exception as e:
 
 
 def strip_set(red, green, blue):
+    global strip_generation
+
     if not USE_STRIP or status_strip is None:
-        return
+        return None
 
-    color = Color(red, green, blue)
+    with strip_lock:
+        strip_generation += 1
+        generation = strip_generation
+        color = Color(red, green, blue)
 
-    for i in range(status_strip.numPixels()):
-        status_strip.setPixelColor(i, color)
+        for i in range(status_strip.numPixels()):
+            status_strip.setPixelColor(i, color)
 
-    status_strip.show()
+        status_strip.show()
+
+    return generation
 
 
 def strip_off():
     strip_set(0, 0, 0)
+
+
+def strip_flash(red, green, blue, duration=STRIP_FLASH_SECONDS):
+    generation = strip_set(red, green, blue)
+
+    if generation is None:
+        return
+
+    def finish_flash():
+        global strip_generation
+
+        with strip_lock:
+            if generation != strip_generation:
+                return
+
+            strip_generation += 1
+            color = Color(0, 0, 0)
+
+            for i in range(status_strip.numPixels()):
+                status_strip.setPixelColor(i, color)
+
+            status_strip.show()
+
+    timer = threading.Timer(duration, finish_flash)
+    timer.daemon = True
+    timer.start()
 
 
 def strip_test_marker(name, red, green, blue):
@@ -249,9 +285,8 @@ def signal_success():
     if USE_LIGHTS:
         green_led.value = LED_BRIGHTNESS
 
-    # Brief green flash without blocking the scanner
-    strip_set(0, 255, 0)
-    threading.Timer(0.15, strip_off).start()
+    # Green flash without blocking the scanner.
+    strip_flash(0, 255, 0)
 
 
 def signal_duplicate():
@@ -260,9 +295,8 @@ def signal_duplicate():
     if USE_LIGHTS:
         green_led.value = LED_BRIGHTNESS
 
-    # Brief green flash without blocking the scanner
-    strip_set(0, 255, 0)
-    threading.Timer(0.15, strip_off).start()
+    # Green flash without blocking the scanner.
+    strip_flash(0, 255, 0)
 
 
 def signal_failure():

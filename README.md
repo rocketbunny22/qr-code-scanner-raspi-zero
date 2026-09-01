@@ -265,6 +265,7 @@ These values live in [`qr_code_scanner.py`](qr_code_scanner.py):
 | `BUZZER_VOLUME` | `0.5` | PWM buzzer duty-cycle value. |
 | `STRIP_LED_COUNT` | `60` | Number of addressable LEDs driven on GPIO 18. |
 | `STRIP_BRIGHTNESS` | `32` | WS281x brightness from 0 through 255. |
+| `STRIP_FLASH_SECONDS` | `1.0` | Duration of the green success/duplicate strip flash. |
 | `SUCCESS_HOLD_SECONDS` | `5` | Maximum success-feedback hold when a newer scan does not replace it. |
 | `RESULT_HOLD_SECONDS` | `0.8` | Maximum non-success feedback hold when a newer scan does not replace it. |
 | `CAMERA_CAPTURE_TIMEOUT_SECONDS` | `5` | Camera-frame timeout before a startup failure is shown. |
@@ -346,8 +347,8 @@ After changing `scanner_init.sh` or any generated unit value, run `sudo systemct
 | --- | --- | --- | --- |
 | Ready | Traffic lights and strip off | Two rising startup tones only at launch | `READY / Scan badge QR` initially, then `READY / Scan next badge` |
 | Processing a new QR | Yellow traffic light; strip off | None before API result | `PROCESSING / Checking badge` |
-| Checked in | Green traffic light; brief green strip | Two short rising tones | `CHECKED IN` plus returned attendee value |
-| Duplicate payload | Green traffic light; brief green strip | One medium tone | `DUPLICATE / Already scanned` |
+| Checked in | Green traffic light; one-second green strip | Two short rising tones | `CHECKED IN` plus returned attendee value |
+| Duplicate payload | Green traffic light; one-second green strip | One medium tone | `DUPLICATE / Already scanned` |
 | Badge not found | Red traffic light and strip | One low long tone | `NOT FOUND / See kiosk` |
 | Invalid local QR | Red traffic light and strip | One low long tone | `INVALID QR / Missing data` |
 | Network request failure | Red traffic light and strip | One low long tone | `OFFLINE / Network error` |
