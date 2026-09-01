@@ -120,6 +120,7 @@ from PIL import Image
 from pyzbar.pyzbar import decode
 from gpiozero import LED, PWMOutputDevice
 from picamera2 import Picamera2
+from rpi_ws281x import PixelStrip, Color
 from waveshare_epd import epd2in13_V4
 
 print("Import check OK")

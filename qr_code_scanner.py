@@ -45,7 +45,13 @@ YELLOW_LED_PIN = 6    # physical pin 31
 GREEN_LED_PIN = 16    # physical pin 36
 
 # Passive beeper
-BUZZER_PIN = 13       # physical pin 33
+BUZZER_PIN = 26       # physical pin 37
+
+# 5V addressable LED strip
+# DATA -> GPIO18 / physical pin 12
+STRIP_PIN = 18
+STRIP_LED_COUNT = 60
+STRIP_BRIGHTNESS = 32  # 0-255, about 12.5%
 
 # Waveshare e-paper wired connector pins
 # These match the normal Waveshare Raspberry Pi SPI wiring:
@@ -63,6 +69,7 @@ EPD_BUSY_PIN = 24     # physical pin 18
 # LED / buzzer setup
 # ----------------------------
 USE_LIGHTS = True
+USE_STRIP = True
 USE_BUZZER = True
 LED_BRIGHTNESS = 1.0
 BUZZER_VOLUME = 0.5
@@ -102,6 +109,7 @@ def replace_queued_item(target_queue, item):
     except queue.Full:
         pass
 
+
 try:
     from gpiozero import PWMLED
 
@@ -117,6 +125,77 @@ except Exception as e:
     print("LEDs disabled:", e)
 
 
+def init_status_strip():
+    global status_strip, USE_STRIP
+
+    try:
+        from rpi_ws281x import PixelStrip
+
+        status_strip = PixelStrip(
+            STRIP_LED_COUNT,
+            STRIP_PIN,
+            800000,
+            10,
+            False,
+            STRIP_BRIGHTNESS,
+            0,
+        )
+
+        status_strip.begin()
+        USE_STRIP = True
+
+        print("LED strip initialized")
+
+    except Exception as e:
+        USE_STRIP = False
+        status_strip = None
+        print("LED strip disabled:", repr(e))
+
+
+# Addressable status strip
+try:
+    from rpi_ws281x import PixelStrip, Color
+
+    status_strip = None
+    init_status_strip()
+
+except Exception as e:
+    USE_STRIP = False
+    status_strip = None
+    Color = None
+    print("LED strip disabled:", repr(e))
+
+
+def strip_set(red, green, blue):
+    if not USE_STRIP or status_strip is None:
+        return
+
+    color = Color(red, green, blue)
+
+    for i in range(status_strip.numPixels()):
+        status_strip.setPixelColor(i, color)
+
+    status_strip.show()
+
+
+def strip_off():
+    strip_set(0, 0, 0)
+
+
+def strip_test_marker(name, red, green, blue):
+    if not USE_STRIP or status_strip is None:
+        return
+
+    print(f"STRIP TEST: {name}")
+    strip_set(red, green, blue)
+    time.sleep(1)
+
+
+# Turn the strip blue as soon as its driver is ready.
+# It remains blue through camera, e-paper and API worker initialization.
+strip_set(0, 0, 255)
+
+
 try:
     from gpiozero import PWMOutputDevice
 
@@ -126,6 +205,7 @@ try:
         initial_value=0,
         frequency=1000,
     )
+    strip_test_marker("after strip init - BLUE", 0, 0, 255)
 
 except Exception as e:
     USE_BUZZER = False
@@ -133,7 +213,7 @@ except Exception as e:
     print("Buzzer disabled:", e)
 
 
-def lights_off():
+def traffic_lights_off():
     if not USE_LIGHTS:
         return
 
@@ -142,32 +222,56 @@ def lights_off():
     green_led.off()
 
 
+def lights_off():
+    traffic_lights_off()
+    strip_off()
+
+
 def signal_ready():
+    # Scanner is loaded and waiting for a badge.
     lights_off()
 
 
 def signal_processing():
-    if not USE_LIGHTS:
-        return
+    # Keep the existing traffic-light yellow processing indication.
+    # The addressable strip stays off while the API request is running.
+    traffic_lights_off()
 
-    lights_off()
-    yellow_led.value = LED_BRIGHTNESS
+    if USE_LIGHTS:
+        yellow_led.value = LED_BRIGHTNESS
+
+    strip_off()
 
 
 def signal_success():
-    if not USE_LIGHTS:
-        return
+    traffic_lights_off()
 
-    lights_off()
-    green_led.value = LED_BRIGHTNESS
+    if USE_LIGHTS:
+        green_led.value = LED_BRIGHTNESS
+
+    # Brief green flash without blocking the scanner
+    strip_set(0, 255, 0)
+    threading.Timer(0.15, strip_off).start()
+
+
+def signal_duplicate():
+    traffic_lights_off()
+
+    if USE_LIGHTS:
+        green_led.value = LED_BRIGHTNESS
+
+    # Brief green flash without blocking the scanner
+    strip_set(0, 255, 0)
+    threading.Timer(0.15, strip_off).start()
 
 
 def signal_failure():
-    if not USE_LIGHTS:
-        return
+    traffic_lights_off()
 
-    lights_off()
-    red_led.value = LED_BRIGHTNESS
+    if USE_LIGHTS:
+        red_led.value = LED_BRIGHTNESS
+
+    strip_set(255, 0, 0)
 
 
 def play_tone(frequency=1000, duration=0.12):
@@ -657,6 +761,11 @@ def main():
             camera_capture = LatestFrameCapture(picam2)
             camera_capture.start()
             camera_capture.get_frame()
+            print("Camera fully initialized")
+
+            # Reclaim the WS281x hardware after all other hardware is ready.
+            init_status_strip()
+            strip_test_marker("after hardware init - GREEN", 0, 255, 0)
 
         except Exception as e:
             hold_startup_failure("STARTUP FAIL", "Camera error", e)
@@ -741,7 +850,7 @@ def main():
 
                 if raw_payload in seen_payloads:
                     print(f"Duplicate QR {fingerprint}")
-                    signal_processing()
+                    signal_duplicate()
                     queue_sound("duplicate")
                     show_status("DUPLICATE", "Already scanned")
                     feedback_ready_at = now + RESULT_HOLD_SECONDS

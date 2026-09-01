@@ -1,6 +1,6 @@
 # OFG QR Code Scanner
 
-A headless QR-badge check-in kiosk for the Ohio Furniture Market. It is designed for a Raspberry Pi Zero 2 W with a Raspberry Pi Camera Module 3, a three-LED traffic-light indicator, a passive buzzer, and a Waveshare 2.13-inch V4 e-paper display.
+A headless QR-badge check-in kiosk for the Ohio Furniture Market. It is designed for a Raspberry Pi Zero 2 W with a Raspberry Pi Camera Module 3, a three-LED traffic-light indicator, a 60-pixel WS281x status strip, a passive buzzer, and a Waveshare 2.13-inch V4 e-paper display.
 
 The scanner continuously captures camera frames, decodes QR codes, sends the badge data to the configured OFG check-in API, and gives immediate visual and audible feedback. It can be started interactively or installed as a `systemd` service that restarts after a crash or reboot.
 
@@ -27,7 +27,7 @@ The scanner continuously captures camera frames, decodes QR codes, sends the bad
 3. Continuously captures frames into a one-frame latest-value buffer and decodes QR codes from every frame the processor can consume.
 4. Accepts QR payloads that are URLs containing `company_id` and `attendee` query-string parameters.
 5. Sends those values, plus the configured scanner identifier, to the OFG API using an authenticated JSON `POST` request.
-6. Shows the result on the e-paper display and signals it through the LEDs and buzzer without pausing camera capture or QR decoding.
+6. Shows the result on the e-paper display and signals it through the traffic lights, addressable strip, and buzzer without pausing camera capture or QR decoding.
 7. Keeps successful and definitive badge outcomes in a bounded 24-hour in-memory history so the same QR payload is not repeatedly submitted.
 
 There is no browser UI or camera preview. The display, LEDs, buzzer, and service logs are the operating interface.
@@ -40,12 +40,13 @@ There is no browser UI or camera preview. The display, LEDs, buzzer, and service
 | Raspberry Pi Camera Module 3 | Yes | Captures badge QR codes through `picamera2`/libcamera. |
 | Waveshare 2.13-inch e-Paper Display V4 | Expected | Shows ready, success, duplicate, and error states. The scanner still runs if its driver cannot initialize. |
 | Red LED | Expected | Failure/startup-failure indicator. |
-| Yellow LED | Expected | QR processing/duplicate indicator. |
-| Green LED | Expected | Successful check-in indicator. |
+| Yellow LED | Expected | QR processing indicator. |
+| Green LED | Expected | Successful check-in and duplicate indicator. |
+| 60-pixel WS281x LED strip | Expected | Startup test colors and brief success/duplicate or steady failure feedback. |
 | Passive buzzer | Expected | Audible startup, success, duplicate, and failure feedback. |
-| Appropriate current-limiting resistors and wiring | Yes | Required for the discrete LEDs and safe GPIO connection. |
+| Appropriate power supply, current-limiting resistors, and wiring | Yes | Required for the LED strip, discrete LEDs, and safe GPIO connection. |
 
-The hardware outputs are optional at runtime: initialization failures for the LEDs, buzzer, or e-paper display are caught and logged, and scanning continues without that device. Camera and API configuration failures instead put the process into a visible startup-failure state.
+The hardware outputs are optional at runtime: initialization failures for the LEDs, strip, buzzer, or e-paper display are caught and logged, and scanning continues without that device. Camera and API configuration failures instead put the process into a visible startup-failure state.
 
 ## Wiring
 
@@ -56,7 +57,8 @@ GPIO names below are Broadcom (BCM) GPIO numbers. Physical header pin numbers ar
 | Red LED | GPIO 5 | 29 | PWM output through `gpiozero.PWMLED`. |
 | Yellow LED | GPIO 6 | 31 | PWM output through `gpiozero.PWMLED`. |
 | Green LED | GPIO 16 | 36 | PWM output through `gpiozero.PWMLED`. |
-| Passive buzzer | GPIO 13 | 33 | PWM output at configurable frequencies. |
+| Passive buzzer | GPIO 26 | 37 | PWM output at configurable frequencies. |
+| WS281x strip data | GPIO 18 | 12 | Data signal for the 60-pixel status strip. Use a suitable external 5 V supply and a common ground. |
 | E-paper reset | GPIO 17 | 11 | Waveshare 2.13-inch V4 connector. |
 | E-paper data/command | GPIO 25 | 22 | Waveshare 2.13-inch V4 connector. |
 | E-paper chip select | GPIO 8 / CE0 | 24 | SPI chip select. |
@@ -93,6 +95,7 @@ It creates a virtual environment that reuses system site packages, then installs
 requests
 python-dotenv
 pyzbar
+rpi-ws281x
 ```
 
 The e-paper driver comes from the Waveshare [`e-Paper`](https://github.com/waveshareteam/e-Paper) repository, specifically the `waveshare_epd.epd2in13_V4` module.
@@ -106,7 +109,7 @@ Camera frame
     -> pyzbar QR-only decode
     -> parse company_id and attendee from the QR URL
     -> one of two authenticated API workers
-    -> non-blocking LED + buzzer + e-paper result
+    -> non-blocking traffic-light + LED-strip + buzzer + e-paper result
 ```
 
 Camera capture runs continuously in one persistent worker instead of creating a thread for every frame. Its queue holds only one frame: if QR decoding is temporarily slower than the camera, an old unprocessed frame is replaced by the newest frame instead of building a latency-producing backlog. Resolution remains 640 x 480 and the decoder remains restricted to QR codes.
@@ -260,6 +263,8 @@ These values live in [`qr_code_scanner.py`](qr_code_scanner.py):
 | `LensPosition` | `10.0` | Fixed manual focus position for Camera Module 3. |
 | `LED_BRIGHTNESS` | `1.0` | PWM LED duty-cycle value. |
 | `BUZZER_VOLUME` | `0.5` | PWM buzzer duty-cycle value. |
+| `STRIP_LED_COUNT` | `60` | Number of addressable LEDs driven on GPIO 18. |
+| `STRIP_BRIGHTNESS` | `32` | WS281x brightness from 0 through 255. |
 | `SUCCESS_HOLD_SECONDS` | `5` | Maximum success-feedback hold when a newer scan does not replace it. |
 | `RESULT_HOLD_SECONDS` | `0.8` | Maximum non-success feedback hold when a newer scan does not replace it. |
 | `CAMERA_CAPTURE_TIMEOUT_SECONDS` | `5` | Camera-frame timeout before a startup failure is shown. |
@@ -305,6 +310,7 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=/home/viztech/qr-code-scanner-raspi-zero/.venv/bin/python -u /home/viztech/qr-code-scanner-raspi-zero/qr_code_scanner.py
 Restart=always
 RestartSec=5
+TimeoutStopSec=20
 
 [Install]
 WantedBy=multi-user.target
@@ -336,19 +342,19 @@ After changing `scanner_init.sh` or any generated unit value, run `sudo systemct
 
 ## Status indicators
 
-| Situation | LED state | Sound | E-paper text |
+| Situation | Light state | Sound | E-paper text |
 | --- | --- | --- | --- |
-| Ready | All off | Two rising startup tones only at launch | `READY / Scan badge QR` initially, then `READY / Scan next badge` |
-| Processing a new QR | Yellow | None before API result | `PROCESSING / Checking badge` |
-| Checked in | Green | Two short rising tones | `CHECKED IN` plus returned attendee value |
-| Duplicate payload | Yellow | One medium tone | `DUPLICATE / Already scanned` |
-| Badge not found | Red | One low long tone | `NOT FOUND / See kiosk` |
-| Invalid local QR | Red | One low long tone | `INVALID QR / Missing data` |
-| Network request failure | Red | One low long tone | `OFFLINE / Network error` |
-| Non-JSON API response | Red | One low long tone | `BAD RESPONSE` plus HTTP status |
-| Unexpected API status | Red | One low long tone | `ERROR / See kiosk` |
-| Missing credentials | Red | One low long tone | `STARTUP FAIL / Missing API config` |
-| Camera failure/timeout | Red | One low long tone | `STARTUP FAIL / Camera error` |
+| Ready | Traffic lights and strip off | Two rising startup tones only at launch | `READY / Scan badge QR` initially, then `READY / Scan next badge` |
+| Processing a new QR | Yellow traffic light; strip off | None before API result | `PROCESSING / Checking badge` |
+| Checked in | Green traffic light; brief green strip | Two short rising tones | `CHECKED IN` plus returned attendee value |
+| Duplicate payload | Green traffic light; brief green strip | One medium tone | `DUPLICATE / Already scanned` |
+| Badge not found | Red traffic light and strip | One low long tone | `NOT FOUND / See kiosk` |
+| Invalid local QR | Red traffic light and strip | One low long tone | `INVALID QR / Missing data` |
+| Network request failure | Red traffic light and strip | One low long tone | `OFFLINE / Network error` |
+| Non-JSON API response | Red traffic light and strip | One low long tone | `BAD RESPONSE` plus HTTP status |
+| Unexpected API status | Red traffic light and strip | One low long tone | `ERROR / See kiosk` |
+| Missing credentials | Red traffic light and strip | One low long tone | `STARTUP FAIL / Missing API config` |
+| Camera failure/timeout | Red traffic light and strip | One low long tone | `STARTUP FAIL / Camera error` |
 
 ## Operations and troubleshooting
 
