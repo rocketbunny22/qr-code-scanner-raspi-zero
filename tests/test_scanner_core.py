@@ -1,6 +1,9 @@
 import unittest
+from tempfile import TemporaryDirectory
+from pathlib import Path
 
 from scanner_core import (
+    ScanOutbox,
     SeenPayloadCache,
     is_retryable_result,
     parse_qr_url,
@@ -79,6 +82,73 @@ class SeenPayloadCacheTests(unittest.TestCase):
             SeenPayloadCache(max_entries=0, ttl_seconds=10)
         with self.assertRaises(ValueError):
             SeenPayloadCache(max_entries=1, ttl_seconds=0)
+
+
+class ScanOutboxTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = TemporaryDirectory()
+        self.database_path = Path(self.temporary_directory.name) / "outbox.sqlite3"
+        self.outbox = ScanOutbox(self.database_path)
+
+    def tearDown(self):
+        self.outbox.close()
+        self.temporary_directory.cleanup()
+
+    def test_persists_entries_and_deduplicates_payloads(self):
+        first_id = self.outbox.enqueue(b"badge", now=10, initial_delay=5)
+        second_id = self.outbox.enqueue(b"badge", now=20, initial_delay=5)
+
+        self.assertEqual(first_id, second_id)
+        self.assertEqual(self.outbox.count(), 1)
+
+        self.outbox.close()
+        self.outbox = ScanOutbox(self.database_path)
+        self.assertEqual(self.outbox.count(), 1)
+
+    def test_claims_due_entry_and_respects_lease(self):
+        entry_id = self.outbox.enqueue(b"badge", now=10, initial_delay=5)
+
+        self.assertIsNone(self.outbox.claim_due(now=14, lease_seconds=30))
+        self.assertEqual(
+            self.outbox.claim_due(now=15, lease_seconds=30),
+            (entry_id, b"badge"),
+        )
+        self.assertIsNone(self.outbox.claim_due(now=20, lease_seconds=30))
+
+    def test_release_all_makes_persisted_entries_due(self):
+        entry_id = self.outbox.enqueue(b"badge", now=10, initial_delay=120)
+
+        self.outbox.release_all(now=20)
+
+        self.assertEqual(
+            self.outbox.claim_due(now=20, lease_seconds=30),
+            (entry_id, b"badge"),
+        )
+
+    def test_retries_with_capped_exponential_backoff(self):
+        entry_id = self.outbox.enqueue(b"badge", now=0, initial_delay=0)
+
+        self.assertEqual(
+            self.outbox.schedule_retry(entry_id, now=10, base_delay=5, max_delay=20),
+            5,
+        )
+        self.assertIsNone(self.outbox.claim_due(now=14, lease_seconds=30))
+        self.assertIsNotNone(self.outbox.claim_due(now=15, lease_seconds=30))
+        self.assertEqual(
+            self.outbox.schedule_retry(entry_id, now=20, base_delay=5, max_delay=20),
+            10,
+        )
+        self.assertEqual(
+            self.outbox.schedule_retry(entry_id, now=30, base_delay=5, max_delay=20),
+            20,
+        )
+
+    def test_acknowledge_removes_entry(self):
+        entry_id = self.outbox.enqueue(b"badge", now=0, initial_delay=0)
+
+        self.outbox.acknowledge(entry_id)
+
+        self.assertEqual(self.outbox.count(), 0)
 
 
 if __name__ == "__main__":

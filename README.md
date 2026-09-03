@@ -29,6 +29,7 @@ The scanner continuously captures camera frames, decodes QR codes, sends the bad
 5. Sends those values, plus the configured scanner identifier, to the OFG API using an authenticated JSON `POST` request.
 6. Shows the result on the e-paper display and signals it through the traffic lights, addressable strip, and buzzer without pausing camera capture or QR decoding.
 7. Keeps successful and definitive badge outcomes in a bounded 24-hour in-memory history so the same QR payload is not repeatedly submitted.
+8. Saves valid scans in a local SQLite outbox before submission and retries them after an API outage.
 
 There is no browser UI or camera preview. The display, LEDs, buzzer, and service logs are the operating interface.
 
@@ -142,7 +143,7 @@ Missing either parameter produces a local `invalid` result without making an API
 
 Every queued QR payload is added to a bounded in-memory history. A code that remains in the camera view is ignored after its first detection rather than repeatedly generating duplicate sounds and display updates. After it has been absent for at least `QR_REARM_SECONDS`, presenting it again shows one `DUPLICATE` result and does not call the API.
 
-Definitive outcomes such as `checked_in`, `not_found`, and `invalid` remain deduplicated for up to 24 hours, with a maximum history of 10,000 payloads. Transport and protocol failures (`offline`, `bad_response`, or an internal request error) are removed from the history, so the operator can remove and present the badge again. The history is not persisted, so all codes become eligible after a restart or reboot.
+Definitive outcomes such as `checked_in`, `not_found`, and `invalid` remain deduplicated for up to 24 hours, with a maximum history of 10,000 payloads. Every valid scan is first stored in `scanner_outbox.sqlite3`, which is private to the scanner account and survives a restart or power loss. If the API is unavailable or returns an unusable response, the scanner keeps the badge in that outbox and retries in the background with capped exponential backoff (5 seconds through 5 minutes). The entry is removed only after a definitive API response. The outbox is intentionally ignored by Git and must be treated as sensitive badge data.
 
 ## API contract
 
@@ -172,8 +173,9 @@ The request has a 10-second timeout. The response body must be JSON. The scanner
 | `checked_in` | Green LED, two rising beeps, `CHECKED IN` with the response `attendee` value. This result is scheduled for up to five seconds without blocking the next scan. |
 | `not_found` | Red LED, low failure tone, `NOT FOUND / See kiosk`. |
 | `invalid` | Red LED, low failure tone, `INVALID QR / Missing data`. |
-| `offline` | Red LED, low failure tone, `OFFLINE / Network error`. This is produced locally for request failures, including timeout. |
-| `bad_response` | Red LED, low failure tone, `BAD RESPONSE` with the HTTP status. This is produced locally when a response is not JSON. |
+| `queued` | Yellow LED, no failure tone, `QUEUED / Will sync`. This is shown when a valid scan cannot be sent immediately; it remains in the local outbox for background retry. |
+| `offline` | Internal retryable result produced locally for request failures, including timeout. It is stored in the outbox rather than presented as a final badge outcome. |
+| `bad_response` | Internal retryable result produced when a response is unusable. It is stored in the outbox rather than presented as a final badge outcome. |
 | `busy` | Red LED, low failure tone, `BUSY / Try badge again`. This is produced locally if the bounded request queue is full. |
 | Any other or absent status | Red LED, low failure tone, `ERROR / See kiosk`. |
 
@@ -272,6 +274,7 @@ These values live in [`qr_code_scanner.py`](qr_code_scanner.py):
 | `QR_REARM_SECONDS` | `0.4` | Minimum absence interval before the same visible payload counts as a new presentation. |
 | `API_WORKER_COUNT` | `2` | Maximum number of different badge requests processed concurrently. |
 | `API_QUEUE_SIZE` | `20` | Maximum number of requests waiting behind the API workers. |
+| `OUTBOX_RETRY_BASE_SECONDS` / `OUTBOX_RETRY_MAX_SECONDS` | `5` / `300` | Initial and maximum delay for replaying queued scans after a retryable API failure. |
 | `SEEN_PAYLOAD_LIMIT` | `10000` | Maximum number of definitive badge outcomes retained. |
 | `SEEN_PAYLOAD_TTL_SECONDS` | `86400` | How long definitive badge outcomes remain deduplicated. |
 
@@ -351,8 +354,7 @@ After changing `scanner_init.sh` or any generated unit value, run `sudo systemct
 | Duplicate payload | Green traffic light; one-second green strip | One medium tone | `DUPLICATE / Already scanned` |
 | Badge not found | Red traffic light and strip | One low long tone | `NOT FOUND / See kiosk` |
 | Invalid local QR | Red traffic light and strip | One low long tone | `INVALID QR / Missing data` |
-| Network request failure | Red traffic light and strip | One low long tone | `OFFLINE / Network error` |
-| Non-JSON API response | Red traffic light and strip | One low long tone | `BAD RESPONSE` plus HTTP status |
+| Queued while offline or busy | Yellow traffic light; strip off | None | `QUEUED / Will sync` |
 | Unexpected API status | Red traffic light and strip | One low long tone | `ERROR / See kiosk` |
 | Missing credentials | Red traffic light and strip | One low long tone | `STARTUP FAIL / Missing API config` |
 | Camera failure/timeout | Red traffic light and strip | One low long tone | `STARTUP FAIL / Camera error` |
@@ -401,7 +403,7 @@ GPIO setup errors are printed as `LEDs disabled:` or `Buzzer disabled:`. Confirm
 2. Inspect service logs for request exceptions, API outcomes, and elapsed request time.
 3. Test network/DNS connectivity from the Pi using the actual configured endpoint.
 4. Verify the API accepts `application/json`, `X-Scanner-Token`, and the three JSON fields described in [API contract](#api-contract).
-5. For an offline or malformed-response failure, remove the badge from view briefly and present it again. Definitive API outcomes remain deduplicated.
+5. Confirm `scanner_outbox.sqlite3` is writable by the service user. Valid scans remain there until a definitive API response, and the scanner retries automatically after connectivity is restored.
 
 ### A badge should be retried
 

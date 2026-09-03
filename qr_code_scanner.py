@@ -13,6 +13,7 @@ import requests
 from pathlib import Path
 
 from scanner_core import (
+    ScanOutbox,
     SeenPayloadCache,
     is_retryable_result,
     parse_qr_url,
@@ -84,6 +85,11 @@ SOUND_QUEUE_SIZE = 4
 SEEN_PAYLOAD_LIMIT = 10_000
 SEEN_PAYLOAD_TTL_SECONDS = 24 * 60 * 60
 STARTUP_FAILURE_RETRY_SECONDS = 10
+OUTBOX_PATH = BASE_DIR / "scanner_outbox.sqlite3"
+OUTBOX_INITIAL_RETRY_SECONDS = 120
+OUTBOX_RETRY_BASE_SECONDS = 5
+OUTBOX_RETRY_MAX_SECONDS = 300
+OUTBOX_LEASE_SECONDS = 60
 
 shutdown_event = threading.Event()
 strip_lock = threading.Lock()
@@ -450,18 +456,25 @@ def send_checkin(qr_data, session):
 api_request_queue = queue.Queue(maxsize=API_QUEUE_SIZE)
 api_result_queue = queue.Queue()
 api_threads = []
+outbox_sync_stop_event = threading.Event()
+outbox_sync_thread = None
+
+
+def create_api_session():
+    session = requests.Session()
+    session.headers.update(
+        {
+            "X-Scanner-Token": API_TOKEN,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "OFG-QR-Scanner/1.0",
+        }
+    )
+    return session
 
 
 def api_worker():
-    with requests.Session() as session:
-        session.headers.update(
-            {
-                "X-Scanner-Token": API_TOKEN,
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "User-Agent": "OFG-QR-Scanner/1.0",
-            }
-        )
+    with create_api_session() as session:
 
         while True:
             request_item = api_request_queue.get()
@@ -469,7 +482,7 @@ def api_worker():
             if request_item is None:
                 break
 
-            scan_id, qr_data, raw_payload = request_item
+            scan_id, qr_data, raw_payload, outbox_entry_id = request_item
             started_at = time.monotonic()
 
             try:
@@ -486,6 +499,7 @@ def api_worker():
                 (
                     scan_id,
                     raw_payload,
+                    outbox_entry_id,
                     result,
                     time.monotonic() - started_at,
                 )
@@ -516,6 +530,63 @@ def stop_api_workers():
 
     for thread in api_threads:
         thread.join(timeout=0.5)
+
+
+def outbox_sync_worker(outbox):
+    """Retry durable scans in the background without affecting camera capture."""
+    with create_api_session() as session:
+        while not outbox_sync_stop_event.is_set():
+            entry = outbox.claim_due(time.time(), OUTBOX_LEASE_SECONDS)
+            if entry is None:
+                outbox_sync_stop_event.wait(1)
+                continue
+
+            entry_id, raw_payload = entry
+            fingerprint = payload_fingerprint(raw_payload)
+            print(f"Retrying queued QR {fingerprint}")
+
+            try:
+                result = send_checkin(raw_payload.decode("utf-8", errors="replace"), session)
+            except Exception as e:
+                print("OUTBOX CHECK-IN ERROR:", repr(e))
+                result = {"success": False, "status": "error", "message": str(e)}
+
+            if is_retryable_result(result):
+                delay = outbox.schedule_retry(
+                    entry_id,
+                    time.time(),
+                    OUTBOX_RETRY_BASE_SECONDS,
+                    OUTBOX_RETRY_MAX_SECONDS,
+                )
+                print(f"Queued QR {fingerprint} will retry in {delay:.0f}s")
+            else:
+                outbox.acknowledge(entry_id)
+                print(
+                    f"Queued QR {fingerprint} completed with "
+                    f"status {result.get('status')!r}"
+                )
+
+
+def start_outbox_sync_worker(outbox):
+    global outbox_sync_thread
+
+    outbox_sync_thread = threading.Thread(
+        target=outbox_sync_worker,
+        args=(outbox,),
+        name="outbox-sync-worker",
+        daemon=True,
+    )
+    outbox_sync_thread.start()
+
+
+def stop_outbox_sync_worker():
+    outbox_sync_stop_event.set()
+
+    if outbox_sync_thread is not None:
+        outbox_sync_thread.join(timeout=11)
+        return not outbox_sync_thread.is_alive()
+
+    return True
 
 
 # ----------------------------
@@ -729,6 +800,13 @@ def present_checkin_result(scan_id, result, elapsed_seconds):
         show_status("CHECKED IN", attendee)
         return SUCCESS_HOLD_SECONDS
 
+    if status == "queued":
+        retry_status = result.get("retry_status", "request queue full")
+        print(f"Scan {scan_id} queued after {retry_status!r} API result")
+        signal_processing()
+        show_status("QUEUED", "Will sync")
+        return RESULT_HOLD_SECONDS
+
     signal_failure()
     queue_sound("failure")
 
@@ -768,6 +846,7 @@ def main():
 
     picam2 = None
     camera_capture = None
+    outbox = None
     exit_code = 0
 
     try:
@@ -804,7 +883,15 @@ def main():
         except Exception as e:
             hold_startup_failure("STARTUP FAIL", "Camera error", e)
 
+        try:
+            outbox = ScanOutbox(OUTBOX_PATH)
+            outbox.release_all(time.time())
+            print(f"Outbox ready with {outbox.count()} queued scans")
+        except Exception as e:
+            hold_startup_failure("STARTUP FAIL", "Outbox error", e)
+
         start_api_workers()
+        start_outbox_sync_worker(outbox)
 
         print("Scanner started. Press Ctrl+C to quit.")
         signal_ready()
@@ -827,13 +914,30 @@ def main():
                 except queue.Empty:
                     break
 
-                completed_id, raw_payload, result, elapsed_seconds = completed_scan
+                (
+                    completed_id,
+                    raw_payload,
+                    outbox_entry_id,
+                    result,
+                    elapsed_seconds,
+                ) = completed_scan
                 pending_scans = max(0, pending_scans - 1)
 
-                # Transport/protocol failures are safe to retry after the badge
-                # leaves the camera view. Definitive API outcomes remain deduped.
                 if is_retryable_result(result):
-                    seen_payloads.discard(raw_payload)
+                    delay = outbox.schedule_retry(
+                        outbox_entry_id,
+                        time.time(),
+                        OUTBOX_RETRY_BASE_SECONDS,
+                        OUTBOX_RETRY_MAX_SECONDS,
+                    )
+                    result = {
+                        "success": False,
+                        "status": "queued",
+                        "retry_status": result.get("status"),
+                    }
+                    print(f"Scan {completed_id} stored for retry in {delay:.0f}s")
+                else:
+                    outbox.acknowledge(outbox_entry_id)
 
                 hold_seconds = present_checkin_result(
                     completed_id,
@@ -891,13 +995,36 @@ def main():
                     continue
 
                 scan_id += 1
+                qr = parse_qr_url(data)
+
+                if not qr["company_id"] or not qr["attendee"]:
+                    seen_payloads.add(raw_payload, now)
+                    result = {"status": "invalid", "success": False}
+                    hold_seconds = present_checkin_result(scan_id, result, 0.0)
+                    feedback_ready_at = now + hold_seconds
+                    continue
+
+                try:
+                    outbox_entry_id = outbox.enqueue(
+                        raw_payload,
+                        time.time(),
+                        OUTBOX_INITIAL_RETRY_SECONDS,
+                    )
+                except Exception as e:
+                    print("OUTBOX ERROR:", repr(e))
+                    result = {"status": "outbox_error", "success": False}
+                    hold_seconds = present_checkin_result(scan_id, result, 0.0)
+                    feedback_ready_at = now + hold_seconds
+                    continue
+
                 seen_payloads.add(raw_payload, now)
 
                 try:
-                    api_request_queue.put_nowait((scan_id, data, raw_payload))
+                    api_request_queue.put_nowait(
+                        (scan_id, data, raw_payload, outbox_entry_id)
+                    )
                 except queue.Full:
-                    seen_payloads.discard(raw_payload)
-                    result = {"status": "busy", "success": False}
+                    result = {"status": "queued", "success": False}
                     hold_seconds = present_checkin_result(scan_id, result, 0.0)
                     feedback_ready_at = now + hold_seconds
                     continue
@@ -934,7 +1061,11 @@ def main():
         if camera_capture is not None:
             camera_capture.wait()
 
+        outbox_sync_stopped = stop_outbox_sync_worker()
         stop_api_workers()
+
+        if outbox is not None and outbox_sync_stopped:
+            outbox.close()
 
         sound_stop_event.set()
         replace_queued_item(sound_queue, None)
