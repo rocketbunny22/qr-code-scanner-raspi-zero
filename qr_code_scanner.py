@@ -5,7 +5,6 @@ import threading
 import signal
 from dotenv import load_dotenv
 import os
-from PIL import Image, ImageDraw, ImageFont
 from picamera2 import Picamera2
 from libcamera import controls
 from pyzbar.pyzbar import decode, ZBarSymbol
@@ -54,18 +53,6 @@ STRIP_PIN = 18
 STRIP_LED_COUNT = 60
 STRIP_BRIGHTNESS = 32  # 0-255, about 12.5%
 STRIP_FLASH_SECONDS = 1.0
-
-# Waveshare e-paper wired connector pins
-# These match the normal Waveshare Raspberry Pi SPI wiring:
-EPD_RST_PIN = 17      # physical pin 11
-EPD_DC_PIN = 25       # physical pin 22
-EPD_CS_PIN = 8        # physical pin 24 / CE0
-EPD_BUSY_PIN = 24     # physical pin 18
-# EPD_DIN/MOSI = GPIO10 / physical pin 19
-# EPD_CLK/SCLK = GPIO11 / physical pin 23
-# EPD_VCC = 3.3V
-# EPD_GND = GND
-
 
 # ----------------------------
 # LED / buzzer setup
@@ -234,7 +221,7 @@ def strip_test_marker(name, red, green, blue):
 
 
 # Turn the strip blue as soon as its driver is ready.
-# It remains blue through camera, e-paper and API worker initialization.
+# It remains blue through camera and API worker initialization.
 strip_set(0, 0, 255)
 
 
@@ -596,146 +583,8 @@ WIDTH = 640
 HEIGHT = 480
 
 
-# ----------------------------
-# E-paper setup
-# ----------------------------
-USE_EINK = True
-epd = None
-EINK_WIDTH = 250
-EINK_HEIGHT = 122
-_last_eink_message = None
-
-EPAPER_LIB = os.getenv(
-    "EPAPER_LIB",
-    str(Path.home() / "e-Paper/RaspberryPi_JetsonNano/python/lib"),
-)
-
-if EPAPER_LIB not in sys.path:
-    sys.path.append(EPAPER_LIB)
-
-
-def clear_epaper():
-    if not USE_EINK or epd is None:
-        return
-
-    try:
-        epd.Clear(0xFF)
-    except TypeError:
-        epd.Clear()
-
-
-def load_font(path, size):
-    try:
-        return ImageFont.truetype(path, size)
-    except Exception:
-        return ImageFont.load_default()
-
-
-font_big = load_font(
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    24,
-)
-
-font_small = load_font(
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    14,
-)
-
-
-try:
-    # This section is for the wired connector setup.
-    #
-    # Wire the e-paper connector like this:
-    # VCC  -> 3.3V
-    # GND  -> GND
-    # DIN  -> GPIO10 / physical pin 19
-    # CLK  -> GPIO11 / physical pin 23
-    # CS   -> GPIO8  / physical pin 24
-    # DC   -> GPIO25 / physical pin 22
-    # RST  -> GPIO17 / physical pin 11
-    # BUSY -> GPIO24 / physical pin 18
-
-    from waveshare_epd import epd2in13_V4
-
-    epd = epd2in13_V4.EPD()
-    epd.init()
-    clear_epaper()
-
-    # Most Waveshare 2.13" examples use landscape as:
-    # width = epd.height, height = epd.width
-    EINK_WIDTH = epd.height
-    EINK_HEIGHT = epd.width
-
-    print("E-paper enabled:", EINK_WIDTH, "x", EINK_HEIGHT)
-
-except Exception as e:
-    USE_EINK = False
-    epd = None
-    print("E-paper disabled:", e)
-
-
-def render_status(text, subtext=""):
-    global _last_eink_message
-
-    if not USE_EINK or epd is None:
-        return
-
-    message_key = (text, subtext)
-
-    # Prevent unnecessary full e-paper refreshes
-    if message_key == _last_eink_message:
-        return
-
-    image = Image.new("1", (EINK_WIDTH, EINK_HEIGHT), 255)
-    draw = ImageDraw.Draw(image)
-
-    draw.text((10, 25), text, font=font_big, fill=0)
-
-    if subtext:
-        draw.text((10, 65), subtext[:30], font=font_small, fill=0)
-
-    epd.display(epd.getbuffer(image))
-    _last_eink_message = message_key
-
-
-display_queue = queue.Queue(maxsize=1)
-display_stop_event = threading.Event()
-
-
-def display_worker():
-    while not display_stop_event.is_set():
-        status_item = display_queue.get()
-
-        if status_item is None:
-            break
-
-        try:
-            render_status(*status_item)
-        except Exception as e:
-            print("E-paper update failed:", repr(e))
-
-
-display_thread = threading.Thread(
-    target=display_worker,
-    name="e-paper-worker",
-    daemon=True,
-)
-display_thread.start()
-
-
 def show_status(text, subtext=""):
     print(f"STATUS: {text} {subtext}")
-
-    if USE_EINK and epd is not None:
-        replace_queued_item(display_queue, (text, subtext))
-
-
-def stop_display_worker():
-    display_stop_event.set()
-    replace_queued_item(display_queue, None)
-    display_thread.join(timeout=3)
-
-    return not display_thread.is_alive()
 
 
 class LatestFrameCapture:
@@ -1075,11 +924,6 @@ def main():
 
         if USE_BUZZER and buzzer is not None:
             buzzer.off()
-
-        display_stopped = stop_display_worker()
-
-        if USE_EINK and epd is not None and display_stopped:
-            epd.sleep()
 
     return exit_code
 

@@ -1,6 +1,6 @@
 # OFG QR Code Scanner
 
-A headless QR-badge check-in kiosk for the Ohio Furniture Market. It is designed for a Raspberry Pi Zero 2 W with a Raspberry Pi Camera Module 3, a three-LED traffic-light indicator, a 60-pixel WS281x status strip, a passive buzzer, and a Waveshare 2.13-inch V4 e-paper display.
+A headless QR-badge check-in kiosk for the Ohio Furniture Market. It is designed for a Raspberry Pi Zero 2 W with a Raspberry Pi Camera Module 3, a three-LED traffic-light indicator, a 60-pixel WS281x status strip, and a passive buzzer.
 
 The scanner continuously captures camera frames, decodes QR codes, sends the badge data to the configured OFG check-in API, and gives immediate visual and audible feedback. It can be started interactively or installed as a `systemd` service that restarts after a crash or reboot.
 
@@ -27,19 +27,18 @@ The scanner continuously captures camera frames, decodes QR codes, sends the bad
 3. Continuously captures frames into a one-frame latest-value buffer and decodes QR codes from every frame the processor can consume.
 4. Accepts QR payloads that are URLs containing `company_id` and `attendee` query-string parameters.
 5. Sends those values, plus the configured scanner identifier, to the OFG API using an authenticated JSON `POST` request.
-6. Shows the result on the e-paper display and signals it through the traffic lights, addressable strip, and buzzer without pausing camera capture or QR decoding.
+6. Signals the result through the traffic lights, addressable strip, buzzer, and service logs without pausing camera capture or QR decoding.
 7. Keeps successful and definitive badge outcomes in a bounded 24-hour in-memory history so the same QR payload is not repeatedly submitted.
 8. Saves valid scans in a local SQLite outbox before submission and retries them after an API outage.
 
-There is no browser UI or camera preview. The display, LEDs, buzzer, and service logs are the operating interface.
+There is no browser UI or camera preview. The LEDs, buzzer, and service logs are the operating interface.
 
 ## Hardware
 
 | Component | Required | Purpose |
 | --- | --- | --- |
-| Raspberry Pi Zero 2 W | Yes | Runs the scanner and drives GPIO/SPI hardware. |
+| Raspberry Pi Zero 2 W | Yes | Runs the scanner and drives GPIO hardware. |
 | Raspberry Pi Camera Module 3 | Yes | Captures badge QR codes through `picamera2`/libcamera. |
-| Waveshare 2.13-inch e-Paper Display V4 | Expected | Shows ready, success, duplicate, and error states. The scanner still runs if its driver cannot initialize. |
 | Red LED | Expected | Failure/startup-failure indicator. |
 | Yellow LED | Expected | QR processing indicator. |
 | Green LED | Expected | Successful check-in and duplicate indicator. |
@@ -47,7 +46,7 @@ There is no browser UI or camera preview. The display, LEDs, buzzer, and service
 | Passive buzzer | Expected | Audible startup, success, duplicate, and failure feedback. |
 | Appropriate power supply, current-limiting resistors, and wiring | Yes | Required for the LED strip, discrete LEDs, and safe GPIO connection. |
 
-The hardware outputs are optional at runtime: initialization failures for the LEDs, strip, buzzer, or e-paper display are caught and logged, and scanning continues without that device. Camera and API configuration failures instead put the process into a visible startup-failure state.
+The hardware outputs are optional at runtime: initialization failures for the LEDs, strip, or buzzer are caught and logged, and scanning continues without that device. Camera and API configuration failures instead put the process into a visible startup-failure state.
 
 ## Wiring
 
@@ -60,16 +59,8 @@ GPIO names below are Broadcom (BCM) GPIO numbers. Physical header pin numbers ar
 | Green LED | GPIO 16 | 36 | PWM output through `gpiozero.PWMLED`. |
 | Passive buzzer | GPIO 26 | 37 | PWM output at configurable frequencies. |
 | WS281x strip data | GPIO 18 | 12 | Data signal for the 60-pixel status strip. Use a suitable external 5 V supply and a common ground. |
-| E-paper reset | GPIO 17 | 11 | Waveshare 2.13-inch V4 connector. |
-| E-paper data/command | GPIO 25 | 22 | Waveshare 2.13-inch V4 connector. |
-| E-paper chip select | GPIO 8 / CE0 | 24 | SPI chip select. |
-| E-paper busy | GPIO 24 | 18 | Busy signal from display. |
-| E-paper MOSI/DIN | GPIO 10 / MOSI | 19 | Standard SPI MOSI. |
-| E-paper clock | GPIO 11 / SCLK | 23 | Standard SPI clock. |
-| E-paper power | 3.3 V | 1 or 17 | Do not use 5 V for the display logic supply. |
-| E-paper ground | GND | Any ground pin | Common ground with Pi and indicator circuitry. |
 
-The pin values are declared near the top of [`qr_code_scanner.py`](qr_code_scanner.py). If the wiring changes, update the corresponding BCM constants there. Enable SPI before using the e-paper display.
+The pin values are declared near the top of [`qr_code_scanner.py`](qr_code_scanner.py). If the wiring changes, update the corresponding BCM constants there.
 
 ## Software and dependencies
 
@@ -81,12 +72,10 @@ python3
 python3-venv
 python3-pip
 python3-picamera2
-python3-pil
 python3-numpy
 python3-gpiozero
 python3-lgpio
 libzbar0
-fonts-dejavu-core
 rpicam-apps
 ```
 
@@ -99,8 +88,6 @@ pyzbar
 rpi-ws281x
 ```
 
-The e-paper driver comes from the Waveshare [`e-Paper`](https://github.com/waveshareteam/e-Paper) repository, specifically the `waveshare_epd.epd2in13_V4` module.
-
 ## How a scan works
 
 ```text
@@ -110,12 +97,12 @@ Camera frame
     -> pyzbar QR-only decode
     -> parse company_id and attendee from the QR URL
     -> one of two authenticated API workers
-    -> non-blocking traffic-light + LED-strip + buzzer + e-paper result
+    -> non-blocking traffic-light + LED-strip + buzzer result
 ```
 
 Camera capture runs continuously in one persistent worker instead of creating a thread for every frame. Its queue holds only one frame: if QR decoding is temporarily slower than the camera, an old unprocessed frame is replaced by the newest frame instead of building a latency-producing backlog. Resolution remains 640 x 480 and the decoder remains restricted to QR codes.
 
-API requests, buzzer patterns, and e-paper refreshes have independent workers. A slow network response, sound, full e-paper refresh, or five-second success hold therefore does not pause detection of the next badge. Two API workers can process separate badges concurrently, and each worker reuses its HTTP session and underlying connection where the server permits it.
+API requests and buzzer patterns have independent workers. A slow network response, sound, or five-second success hold therefore does not pause detection of the next badge. Two API workers can process separate badges concurrently, and each worker reuses its HTTP session and underlying connection where the server permits it.
 
 The program allows five seconds for the camera worker to supply a frame. If the camera does not return a usable frame, it shows a red LED, failure tone, and `STARTUP FAIL / Camera error` for ten seconds before exiting with an error. The installed `systemd` service can then restart it automatically.
 
@@ -201,38 +188,26 @@ chmod +x scanner_init.sh
 ./scanner_init.sh
 ```
 
-Run the script as the intended non-root account (for example, `viztech`). It uses `sudo` only for system packages, SPI configuration, service installation, and ownership changes. It prompts for `OFG_URL` and `OFG_API_KEY` only when `.env` does not already exist. SSH is left unchanged by default; run `ENABLE_SSH=1 ./scanner_init.sh` if the installer should enable it.
+Run the script as the intended non-root account (for example, `viztech`). It uses `sudo` only for system packages, service installation, and ownership changes. It prompts for `OFG_URL` and `OFG_API_KEY` only when `.env` does not already exist. SSH is left unchanged by default; run `ENABLE_SSH=1 ./scanner_init.sh` if the installer should enable it.
 
 ### 2. What `scanner_init.sh` changes
 
 The setup script:
 
 1. Updates APT package metadata and installs the required OS packages.
-2. Enables SPI with `raspi-config`.
-3. Optionally enables and starts SSH when `ENABLE_SSH=1` is supplied.
-4. Clones or fast-forwards the Waveshare `e-Paper` repository at `~/e-Paper`.
-5. Creates `.venv` with `--system-site-packages`.
-6. Installs the Python-only dependencies into that environment.
-7. Creates `.env` with mode `0600` if it does not already exist.
-8. Writes `/etc/systemd/system/qrscanner.service`.
-9. Enables the service, but does not start it.
-10. Runs an import check for the camera, GPIO, QR, display, and HTTP libraries.
+2. Optionally enables and starts SSH when `ENABLE_SSH=1` is supplied.
+3. Creates `.venv` with `--system-site-packages`.
+4. Installs the Python-only dependencies into that environment.
+5. Creates `.env` with mode `0600` if it does not already exist.
+6. Writes `/etc/systemd/system/qrscanner.service`.
+7. Enables the service, but does not start it.
+8. Runs an import check for the camera, GPIO, QR, and HTTP libraries.
 
-Reboot after installation so SPI and camera configuration are cleanly initialized:
+Reboot after installation so camera configuration is cleanly initialized:
 
 ```bash
 sudo reboot
 ```
-
-### 3. Using another account or directory
-
-The installer clones the Waveshare repository under the executing user's home directory. The scanner derives the corresponding library path from the service user's home directory:
-
-```text
-~/e-Paper/RaspberryPi_JetsonNano/python/lib
-```
-
-Set the optional `EPAPER_LIB` environment variable if the Waveshare library lives elsewhere. Re-run the installer after moving an existing checkout so it regenerates the systemd unit with the new path.
 
 ## Configuration
 
@@ -294,7 +269,7 @@ source .venv/bin/activate
 python qr_code_scanner.py
 ```
 
-The program logs its `.env` path, whether the API URL and key were loaded, e-paper initialization, non-reversible QR fingerprints, API outcomes, and per-request completion time. Press `Ctrl+C` to exit when a keyboard and terminal are attached. The process turns off LEDs/buzzer, stops the camera and background workers, and sleeps the e-paper display during normal shutdown.
+The program logs its `.env` path, whether the API URL and key were loaded, non-reversible QR fingerprints, API outcomes, and per-request completion time. Press `Ctrl+C` to exit when a keyboard and terminal are attached. The process turns off LEDs/buzzer and stops the camera and background workers during normal shutdown.
 
 ### `systemd` service
 
@@ -346,18 +321,15 @@ After changing `scanner_init.sh` or any generated unit value, run `sudo systemct
 
 ## Status indicators
 
-| Situation | Light state | Sound | E-paper text |
-| --- | --- | --- | --- |
-| Ready | Traffic lights and strip off | Two rising startup tones only at launch | `READY / Scan badge QR` initially, then `READY / Scan next badge` |
-| Processing a new QR | Yellow traffic light; strip off | None before API result | `PROCESSING / Checking badge` |
-| Checked in | Green traffic light; one-second green strip | Two short rising tones | `CHECKED IN` plus returned attendee value |
-| Duplicate payload | Green traffic light; one-second green strip | One medium tone | `DUPLICATE / Already scanned` |
-| Badge not found | Red traffic light and strip | One low long tone | `NOT FOUND / See kiosk` |
-| Invalid local QR | Red traffic light and strip | One low long tone | `INVALID QR / Missing data` |
-| Queued while offline or busy | Yellow traffic light; strip off | None | `QUEUED / Will sync` |
-| Unexpected API status | Red traffic light and strip | One low long tone | `ERROR / See kiosk` |
-| Missing credentials | Red traffic light and strip | One low long tone | `STARTUP FAIL / Missing API config` |
-| Camera failure/timeout | Red traffic light and strip | One low long tone | `STARTUP FAIL / Camera error` |
+| Situation | Light state | Sound |
+| --- | --- | --- |
+| Ready | Traffic lights and strip off | Two rising startup tones only at launch |
+| Processing a new QR | Yellow traffic light; strip off | None before API result |
+| Checked in | Green traffic light; one-second green strip | Two short rising tones |
+| Duplicate payload | Green traffic light; one-second green strip | One medium tone |
+| Badge not found or invalid QR | Red traffic light and strip | One low long tone |
+| Queued while offline or busy | Yellow traffic light; strip off | None |
+| Unexpected API status or startup failure | Red traffic light and strip | One low long tone |
 
 ## Operations and troubleshooting
 
@@ -378,20 +350,6 @@ After changing `scanner_init.sh` or any generated unit value, run `sudo systemct
 
 4. Confirm the installed system has `python3-picamera2` and that the virtual environment uses system site packages.
 5. Adjust `LensPosition` only after validating the physical scan distance and lighting. The configured manual value is `10.0`; it does not continuously autofocus.
-
-### E-paper display is disabled
-
-The program prints `E-paper disabled:` followed by the import or initialization error, then continues scanning. Check:
-
-1. SPI is enabled: `sudo raspi-config nonint get_spi` should report enabled.
-2. The display is specifically a Waveshare 2.13-inch V4 compatible with `epd2in13_V4`.
-3. SPI wires use the pin table above and the display has 3.3 V power and common ground.
-4. The Waveshare repository exists under the service user's `~/e-Paper` directory, or `EPAPER_LIB` points to its Python library.
-5. The driver directory contains `waveshare_epd`:
-
-   ```bash
-   ls /home/viztech/e-Paper/RaspberryPi_JetsonNano/python/lib/waveshare_epd
-   ```
 
 ### LEDs or buzzer do not work
 
@@ -432,7 +390,7 @@ sudo systemctl stop qrscanner.service
 
 ```text
 .
-├── qr_code_scanner.py  # Scanner application: camera, decoding, API, GPIO, e-paper
+├── qr_code_scanner.py  # Scanner application: camera, decoding, API, and GPIO
 ├── scanner_core.py     # Hardware-independent parsing and duplicate-history helpers
 ├── scanner_init.sh     # Raspberry Pi provisioning and systemd installation
 ├── requirements.txt    # Python dependency constraints
@@ -446,9 +404,9 @@ sudo systemctl stop qrscanner.service
 - Camera capture and QR decoding run concurrently. The decoder examines the freshest full-resolution frame available and stale unprocessed frames are discarded.
 - API requests use two persistent-session workers, allowing the next QR to be detected and submitted while another request is still in flight.
 - The client sends one HTTP request per newly seen payload and does not inspect the HTTP status itself if the server returned JSON; its visible outcome is selected from the JSON `status` field.
-- The scanner logs a short SHA-256 fingerprint instead of raw QR contents or complete API results. Successful attendee values are still shown on the physical display.
-- Buzzer sequences and e-paper rendering run outside the scanner loop. The e-paper queue keeps the newest requested status so slow full refreshes cannot delay badge detection.
-- API credentials, scanner ID, and an optional e-paper library override come from `.env`; camera settings, hardware pins, timing, sound, brightness, and focus remain source configuration.
+- The scanner logs a short SHA-256 fingerprint instead of raw QR contents or complete API results.
+- Buzzer sequences run outside the scanner loop so sound cannot delay badge detection.
+- API credentials and scanner ID come from `.env`; camera settings, hardware pins, timing, sound, brightness, and focus remain source configuration.
 - Hardware-independent helpers have a standard-library unit test suite. Run it on a development machine with:
 
   ```bash
@@ -457,4 +415,4 @@ sudo systemctl stop qrscanner.service
 
   A safe syntax-only check for the complete hardware runtime is `python3 -m py_compile qr_code_scanner.py scanner_core.py`.
 
-  Running the scanner itself requires Raspberry Pi camera/GPIO/e-paper dependencies and attached hardware.
+  Running the scanner itself requires Raspberry Pi camera/GPIO dependencies and attached hardware.

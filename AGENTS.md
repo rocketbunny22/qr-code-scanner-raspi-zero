@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-- `qr_code_scanner.py` is the hardware-facing kiosk runtime. It owns camera capture, GPIO, e-paper, API workers, and operator feedback.
+- `qr_code_scanner.py` is the hardware-facing kiosk runtime. It owns camera capture, GPIO, API workers, and operator feedback.
 - `scanner_core.py` contains hardware-independent QR parsing, payload fingerprinting, retry classification, and the bounded seen-payload cache. Put logic that can run without Raspberry Pi hardware here when practical.
 - `tests/test_scanner_core.py` contains unit tests for `scanner_core.py`.
 - `scanner_init.sh` provisions a Raspberry Pi, creates `.venv`, installs dependencies, and writes the `qrscanner.service` unit.
@@ -17,7 +17,7 @@ python3 -m unittest discover -s tests -v
 python3 -m py_compile qr_code_scanner.py scanner_core.py
 ```
 
-The first command runs the unit suite; the second catches syntax errors without importing Raspberry Pi-specific dependencies. On a provisioned Pi, activate `.venv` and run `python qr_code_scanner.py` for an interactive scanner session. Use `./scanner_init.sh` only for device setup; it installs OS packages, configures SPI, and creates a systemd service.
+The first command runs the unit suite; the second catches syntax errors without importing Raspberry Pi-specific dependencies. On a provisioned Pi, activate `.venv` and run `python qr_code_scanner.py` for an interactive scanner session. Use `./scanner_init.sh` only for device setup; it installs OS packages and creates a systemd service.
 
 ## Coding Style & Naming Conventions
 

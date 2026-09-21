@@ -3,15 +3,11 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/"
 PROJECT_USER="${SUDO_USER:-$USER}"
-PROJECT_HOME="$(getent passwd "$PROJECT_USER" | cut -d: -f6)"
 ENABLE_SSH="${ENABLE_SSH:-0}"
 
 VENV_DIR="$PROJECT_DIR/.venv"
 SCANNER_SCRIPT="$PROJECT_DIR/qr_code_scanner.py"
 SERVICE_FILE="/etc/systemd/system/qrscanner.service"
-
-EPAPER_DIR="$PROJECT_HOME/e-Paper"
-EPAPER_LIB="$EPAPER_DIR/RaspberryPi_JetsonNano/python/lib"
 
 echo "Project: $PROJECT_DIR"
 echo "User: $PROJECT_USER"
@@ -29,16 +25,11 @@ sudo apt install -y \
     python3-venv \
     python3-pip \
     python3-picamera2 \
-    python3-pil \
     python3-numpy \
     python3-gpiozero \
     python3-lgpio \
     libzbar0 \
-    fonts-dejavu-core \
     rpicam-apps
-
-echo "Enabling SPI..."
-sudo raspi-config nonint do_spi 0 || true
 
 if [[ "$ENABLE_SSH" == "1" ]]; then
     echo "Enabling SSH..."
@@ -46,20 +37,6 @@ if [[ "$ENABLE_SSH" == "1" ]]; then
     sudo systemctl start ssh
 else
     echo "Leaving SSH unchanged. Set ENABLE_SSH=1 to enable it."
-fi
-
-echo "Installing Waveshare e-Paper library..."
-if [[ ! -d "$EPAPER_DIR" ]]; then
-    git clone https://github.com/waveshareteam/e-Paper.git "$EPAPER_DIR"
-else
-    git -C "$EPAPER_DIR" pull --ff-only
-fi
-
-sudo chown -R "$PROJECT_USER:$PROJECT_USER" "$EPAPER_DIR"
-
-if [[ ! -d "$EPAPER_LIB/waveshare_epd" ]]; then
-    echo "ERROR: waveshare_epd not found at $EPAPER_LIB/waveshare_epd"
-    exit 1
 fi
 
 echo "Creating venv..."
@@ -112,16 +89,11 @@ sudo systemctl enable qrscanner.service
 
 echo "Verifying Python imports..."
 "$VENV_DIR/bin/python" - <<EOF
-import sys
-sys.path.insert(0, "$EPAPER_LIB")
-
 import requests
-from PIL import Image
 from pyzbar.pyzbar import decode
 from gpiozero import LED, PWMOutputDevice
 from picamera2 import Picamera2
 from rpi_ws281x import PixelStrip, Color
-from waveshare_epd import epd2in13_V4
 
 print("Import check OK")
 EOF
