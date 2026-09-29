@@ -23,7 +23,7 @@ The scanner continuously captures camera frames, decodes QR codes, sends the bad
 ## What it does
 
 1. Starts the Pi camera at 640 x 480 pixels and 30 FPS.
-2. Uses a fixed manual camera lens position of `10.0`.
+2. Uses a fixed manual camera lens position of `20.0`.
 3. Continuously captures frames into a one-frame latest-value buffer and decodes QR codes from every frame the processor can consume.
 4. Accepts QR payloads that are URLs containing `company_id` and `attendee` query-string parameters.
 5. Sends those values, plus the configured scanner identifier, to the OFG API using an authenticated JSON `POST` request.
@@ -237,7 +237,7 @@ These values live in [`qr_code_scanner.py`](qr_code_scanner.py):
 | `SCANNER_ID` | `scanner-1` | Included in every API request. Assign a distinct value per physical kiosk if the API uses it for attribution. |
 | `WIDTH` / `HEIGHT` | `640` / `480` | Camera capture resolution. |
 | Frame rate | `30` | Requested video configuration rate. |
-| `LensPosition` | `10.0` | Fixed manual focus position for Camera Module 3. |
+| `LensPosition` | `20.0` | Fixed manual focus position for Camera Module 3 Wide. |
 | `LED_BRIGHTNESS` | `1.0` | PWM LED duty-cycle value. |
 | `BUZZER_VOLUME` | `0.5` | PWM buzzer duty-cycle value. |
 | `STRIP_LED_COUNT` | `60` | Number of addressable LEDs driven on GPIO 18. |
@@ -349,7 +349,7 @@ After changing `scanner_init.sh` or any generated unit value, run `sudo systemct
    ```
 
 4. Confirm the installed system has `python3-picamera2` and that the virtual environment uses system site packages.
-5. Adjust `LensPosition` only after validating the physical scan distance and lighting. The configured manual value is `10.0`; it does not continuously autofocus.
+5. Adjust `LensPosition` only after validating the physical scan distance and lighting. The configured manual value is `20.0`; it does not continuously autofocus.
 
 ### LEDs or buzzer do not work
 

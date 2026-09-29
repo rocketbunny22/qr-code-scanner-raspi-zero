@@ -717,7 +717,7 @@ def main():
             # Use the calibrated fixed-focus position for the kiosk scan distance.
             picam2.set_controls({
                 "AfMode": controls.AfModeEnum.Manual,
-                "LensPosition": 10.0,
+                "LensPosition": 20.0,
             })
 
             camera_capture = LatestFrameCapture(picam2)
