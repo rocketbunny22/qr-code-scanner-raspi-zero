@@ -12,6 +12,7 @@ The scanner continuously captures camera frames, decodes QR codes, sends the bad
 - [Software and dependencies](#software-and-dependencies)
 - [How a scan works](#how-a-scan-works)
 - [API contract](#api-contract)
+- [Provisioning a bare Raspberry Pi](#provisioning-a-bare-raspberry-pi)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Running the scanner](#running-the-scanner)
@@ -128,7 +129,7 @@ Missing either parameter produces a local `invalid` result without making an API
 
 ### Duplicate behavior
 
-Every queued QR payload is added to a bounded in-memory history. A code that remains in the camera view is ignored after its first detection rather than repeatedly generating duplicate sounds and display updates. After it has been absent for at least `QR_REARM_SECONDS`, presenting it again shows one `DUPLICATE` result and does not call the API.
+Every queued QR payload is added to a bounded in-memory history. A code that remains in the camera view is ignored after its first detection rather than repeatedly generating duplicate sounds and indicator updates. After it has been absent for at least `QR_REARM_SECONDS`, presenting it again shows one `DUPLICATE` result and does not call the API.
 
 Definitive outcomes such as `checked_in`, `not_found`, and `invalid` remain deduplicated for up to 24 hours, with a maximum history of 10,000 payloads. Every valid scan is first stored in `scanner_outbox.sqlite3`, which is private to the scanner account and survives a restart or power loss. If the API is unavailable or returns an unusable response, the scanner keeps the badge in that outbox and retries in the background with capped exponential backoff (5 seconds through 5 minutes). The entry is removed only after a definitive API response. The outbox is intentionally ignored by Git and must be treated as sensitive badge data.
 
@@ -166,7 +167,88 @@ The request has a 10-second timeout. The response body must be JSON. The scanner
 | `busy` | Red LED, low failure tone, `BUSY / Try badge again`. This is produced locally if the bounded request queue is full. |
 | Any other or absent status | Red LED, low failure tone, `ERROR / See kiosk`. |
 
-For successful check-ins, the API should return the attendee name/value in an `attendee` property if it should appear on the display. The display shows at most 30 characters of a subtext value.
+For successful check-ins, the API should return the attendee name/value in an `attendee` property for operational logs.
+
+## Provisioning a bare Raspberry Pi
+
+Follow this sequence for a new Pi before installing the scanner. Keep the Pi powered off while attaching the camera and all GPIO wiring.
+
+### 1. Prepare Raspberry Pi OS
+
+1. On another computer, use [Raspberry Pi Imager](https://www.raspberrypi.com/software/) to write the current **Raspberry Pi OS Lite (64-bit)** image to a reliable microSD card.
+2. In Imager customisation, set a hostname (for example, `qrscanner`), create the `viztech` user, configure Wi-Fi if Ethernet is unavailable, set the correct time zone, and enable SSH with public-key authentication where possible.
+3. Insert the card, connect Ethernet if available, then power the Pi from its normal Pi-rated USB power supply. Find its address from your router or connect with `ssh viztech@qrscanner.local`.
+4. Update the base OS, then reboot:
+
+   ```bash
+   sudo apt update
+   sudo apt full-upgrade -y
+   sudo reboot
+   ```
+
+Raspberry Pi Imager can preconfigure the hostname, user, network, and SSH access for a headless first boot. Raspberry Pi OS uses the current `libcamera` stack required by `picamera2`; do not enable the legacy camera stack.
+
+### 2. Verify the camera before installing the app
+
+With power disconnected, attach the Camera Module 3 Wide ribbon cable in the correct orientation for the Pi's camera connector. Reconnect power, then run:
+
+```bash
+rpicam-hello --list-cameras
+```
+
+The output should identify `imx708_wide`. If it does not, power down and recheck the ribbon-cable seating and orientation. The scanner uses manual focus with `LensPosition = 20.0`; validate focus at the final badge distance after installation.
+
+### 3. Wire the low-current indicators
+
+Use BCM numbering, not physical pin numbers. For each discrete LED, wire **GPIO -> 220–330 ohm resistor -> LED anode**, then LED cathode to a Pi ground pin. Wire a passive piezo buzzer's positive lead to GPIO 26 and its negative lead to ground. If a buzzer requires more than a few milliamps or is not a piezo element, drive it through a transistor/MOSFET circuit instead of directly from GPIO.
+
+| Device | GPIO | Physical pin |
+| --- | ---: | ---: |
+| Red LED | GPIO 5 | 29 |
+| Yellow LED | GPIO 6 | 31 |
+| Green LED | GPIO 16 | 36 |
+| Passive buzzer | GPIO 26 | 37 |
+
+### 4. Wire the WS281x strip to an external supply
+
+For 60 pixels, use a listed, regulated **5 V / 5 A** DC supply, 18–20 AWG power leads, and a 5 A inline fuse close to the supply's positive terminal. A 60-pixel strip can draw up to 3.6 A at full-white brightness. Do **not** power this strip from the Pi's 5 V header.
+
+At the strip input (`DIN`; arrows point away from the input), connect:
+
+```text
+5 V supply +  -> inline fuse -> strip +5V
+5 V supply - ---------------> strip GND
+                              -> Pi GND (for example, physical pin 6)
+Pi GPIO 18 (pin 12) -> 74AHCT125 level shifter -> 330–470 ohm resistor -> strip DIN
+```
+
+Power the 74AHCT125 from the same external 5 V supply: pin 14 to +5 V, pin 7 to ground, pin 1 (`1OE`) to ground, pin 2 (`1A`) to Pi GPIO 18, and pin 3 (`1Y`) through the resistor to strip `DIN`. Place a 0.1 µF ceramic capacitor across the level shifter's power pins and a 500–1000 µF electrolytic capacitor across the strip's `+5V` and `GND` at its input (observe capacitor polarity). For long strips or visible dimming at the far end, inject the same supply's +5 V and ground at the far end as well.
+
+The shared ground is required. Never connect the external supply's +5 V lead to a Pi GPIO or the Pi's 3.3 V rail. The 74AHCT125 is recommended because Pi GPIO data is 3.3 V and a 5 V WS281x strip may not reliably accept that level directly. Keep the code's `STRIP_BRIGHTNESS = 32` until external power and the level shifter are installed and tested; only then raise it toward 255.
+
+GPIO 18 uses the Pi's PWM hardware. Disable onboard analogue audio before using it for the strip: edit `/boot/firmware/config.txt`, change `dtparam=audio=on` to `dtparam=audio=off`, and reboot. This scanner's GPIO 26 piezo buzzer does not use the analogue audio output.
+
+### 5. Install, configure, and bring up the scanner
+
+Clone and run the project installer as `viztech`:
+
+```bash
+cd /home/viztech
+git clone https://github.com/rocketbunny22/qr-code-scanner-raspi-zero.git
+cd qr-code-scanner-raspi-zero
+chmod +x scanner_init.sh
+./scanner_init.sh
+```
+
+The installer prompts for `OFG_URL` and `OFG_API_KEY`, creates `.venv`, and installs/enables `qrscanner.service`. Reboot after installation, then verify the service and follow its logs:
+
+```bash
+sudo reboot
+sudo systemctl status qrscanner.service --no-pager
+sudo journalctl -u qrscanner.service -f
+```
+
+Before increasing strip brightness, confirm that startup produces the blue and green strip tests without Pi undervoltage warnings, rebooting, camera failures, or LED glitches.
 
 ## Installation
 
