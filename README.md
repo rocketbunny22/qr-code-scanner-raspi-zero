@@ -1,6 +1,6 @@
 # OFG QR Code Scanner
 
-A headless QR-badge check-in kiosk for the Ohio Furniture Market. It is designed for a Raspberry Pi Zero 2 W with a Raspberry Pi Camera Module 3, a three-LED traffic-light indicator, a 60-pixel WS281x status strip, and a passive buzzer.
+A headless QR-badge check-in kiosk for the Ohio Furniture Market. It is designed for a Raspberry Pi Zero 2 W with a Raspberry Pi Camera Module 3 Wide, a three-LED traffic-light indicator, a 60-pixel WS281x status strip, and a passive buzzer.
 
 The scanner continuously captures camera frames, decodes QR codes, sends the badge data to the configured OFG check-in API, and gives immediate visual and audible feedback. It can be started interactively or installed as a `systemd` service that restarts after a crash or reboot.
 
@@ -39,7 +39,7 @@ There is no browser UI or camera preview. The LEDs, buzzer, and service logs are
 | Component | Required | Purpose |
 | --- | --- | --- |
 | Raspberry Pi Zero 2 W | Yes | Runs the scanner and drives GPIO hardware. |
-| Raspberry Pi Camera Module 3 | Yes | Captures badge QR codes through `picamera2`/libcamera. |
+| Raspberry Pi Camera Module 3 Wide | Yes | Captures badge QR codes through `picamera2`/libcamera. |
 | Red LED | Expected | Failure/startup-failure indicator. |
 | Yellow LED | Expected | QR processing indicator. |
 | Green LED | Expected | Successful check-in and duplicate indicator. |
