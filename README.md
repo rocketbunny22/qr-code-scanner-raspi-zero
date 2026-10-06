@@ -103,7 +103,7 @@ Camera frame
     -> non-blocking traffic-light + LED-strip + buzzer result
 ```
 
-Camera capture runs continuously in one persistent worker. Its queue holds only one frame: if QR decoding is slower than the camera, an old unprocessed frame is replaced by the newest frame. The default capture path copies only the luminance plane from a mapped camera buffer and releases that buffer before decoding. Picamera2's internal completed-frame queue is disabled by default. The decoder tries a central 320 x 320 crop, searches the full frame immediately on a miss, and also searches the full frame every third processed frame even when the crop succeeds. This preserves discovery of additional, off-centre badges.
+Camera capture runs continuously in one persistent worker. Its queue holds only one frame: if QR decoding is slower than the camera, an old unprocessed frame is replaced by the newest frame. The default capture path copies only the luminance plane from a mapped camera buffer and releases that buffer before decoding. Picamera2's internal completed-frame queue is disabled by default. The decoder tries a central 384 x 384 crop, searches the full frame immediately on a miss, and also searches the full frame every third processed frame even when the crop succeeds. This preserves discovery of additional, off-centre badges.
 
 Persistence, API requests, operator feedback, and buzzer patterns have independent workers. A database commit, slow network response, sound, or five-second success hold therefore does not run on the decoding thread. Two API workers can process separate badges concurrently, and each worker reuses its HTTP session and underlying connection where the server permits it. Feedback can present a completed API result while the next frame is being decoded.
 
@@ -332,7 +332,7 @@ Set these optional values in `.env`; process environment values take precedence.
 | `SCANNER_COPY_MODE` | `luma` | Copy mapped luma only; `array` uses the full-array capture path for comparison. |
 | `SCANNER_SENSOR_MODE` | `-1` | Automatic sensor selection; a nonnegative index selects from `camera.sensor_modes`. |
 | `SCANNER_DECODER` | `pyzbar` | QR backend: `pyzbar` or separately installed `zxingcpp`. |
-| `SCANNER_CROP_SIZE` | `320` | Central square size, clipped to frame dimensions; `0` disables cropping. |
+| `SCANNER_CROP_SIZE` | `384` | Central square size, clipped to frame dimensions; `0` disables cropping. |
 | `SCANNER_FULL_FRAME_INTERVAL` | `3` | Full search every N processed frames even on crop hits; misses always search immediately. |
 | `SCANNER_API_WORKERS` | `2` | Concurrent API workers with persistent HTTP sessions. |
 | `SCANNER_PERSISTENCE_QUEUE` | `20` | Maximum scans waiting in RAM to be saved. Saved outage backlog remains on disk. |
@@ -396,13 +396,13 @@ python -m pip install -r requirements-performance.txt
 sudo systemctl stop qrscanner.service
 python capture_benchmark_frames.py /tmp/qr-benchmark --frames 60
 python benchmark_decoder.py /tmp/qr-benchmark --crop-size 0
-python benchmark_decoder.py /tmp/qr-benchmark --crop-size 320 --full-frame-interval 3
+python benchmark_decoder.py /tmp/qr-benchmark --crop-size 384 --full-frame-interval 3
 sudo systemctl start qrscanner.service
 ```
 
 The capture directory must not already exist. Keep captures outside the repository: they can contain private badge data. The tool creates a private directory (`0700`) and files (`0600`), uses the same `.env` camera settings as the scanner, records only the requested number of grayscale `.npy` frames, and never submits check-ins. Delete the captures after testing. Disk writes affect capture spacing, so use these files to compare decoder work on identical images; use live metrics for camera throughput.
 
-The benchmark reports median/p95 decode time, frames with reads, payload read counts, and agreement between backends. Agreement does not establish correctness without labelled ground truth. Unavailable backends are reported explicitly. Compare `SCANNER_CROP_SIZE=0` against `320` in live scanning too. To select ZXing after testing, set `SCANNER_DECODER=zxingcpp` in `.env` and restart; the default remains pyzbar. A missing selected backend fails startup instead of silently changing decoder.
+The benchmark reports median/p95 decode time, frames with reads, payload read counts, and agreement between backends. Agreement does not establish correctness without labelled ground truth. Unavailable backends are reported explicitly. Compare `SCANNER_CROP_SIZE=0` against `384` in live scanning too. To select ZXing after testing, set `SCANNER_DECODER=zxingcpp` in `.env` and restart; the default remains pyzbar. A missing selected backend fails startup instead of silently changing decoder.
 
 ### Camera experiments
 

@@ -18,7 +18,7 @@ class QrDecoderTests(unittest.TestCase):
 
     def backend(self, image):
         self.shapes.append(image.shape)
-        return [b"centre"] if image.shape == (320, 320) else [b"centre", b"edge"]
+        return [b"centre"] if image.shape == (384, 384) else [b"centre", b"edge"]
 
     def test_searches_center_crop_first(self):
         images = []
@@ -29,18 +29,18 @@ class QrDecoderTests(unittest.TestCase):
 
         decoder = QrDecoder(backend)
         self.assertEqual(decoder.decode(self.image), {b"centre"})
-        np.testing.assert_array_equal(images[0], self.image[80:400, 160:480])
+        np.testing.assert_array_equal(images[0], self.image[48:432, 128:512])
         self.assertEqual(len(images), 1)
 
     def test_full_frame_search_finds_edges_even_with_continuous_crop_hits(self):
         decoder = QrDecoder(self.backend, full_frame_interval=2)
         self.assertEqual(decoder.decode(self.image), {b"centre"})
         self.assertEqual(decoder.decode(self.image), {b"centre", b"edge"})
-        self.assertEqual(self.shapes, [(320, 320), (320, 320), (480, 640)])
+        self.assertEqual(self.shapes, [(384, 384), (384, 384), (480, 640)])
 
     def test_crop_miss_searches_full_frame_immediately(self):
         def backend(image):
-            return [] if image.shape == (320, 320) else [b"edge"]
+            return [] if image.shape == (384, 384) else [b"edge"]
 
         self.assertEqual(QrDecoder(backend).decode(self.image), {b"edge"})
 

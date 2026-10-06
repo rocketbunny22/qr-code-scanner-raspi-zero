@@ -36,7 +36,7 @@ class QrDecoder:
     immediately. Set ``crop_size=0`` to disable cropping for comparison.
     """
 
-    def __init__(self, decoder, crop_size=320, full_frame_interval=5):
+    def __init__(self, decoder, crop_size=384, full_frame_interval=5):
         if crop_size < 0:
             raise ValueError("crop_size must be nonnegative")
         if full_frame_interval < 1:

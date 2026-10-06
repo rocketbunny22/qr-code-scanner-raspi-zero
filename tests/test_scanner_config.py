@@ -8,6 +8,7 @@ class ScannerSettingsTests(unittest.TestCase):
         settings = ScannerSettings.from_env({})
         self.assertEqual((settings.width, settings.height, settings.fps), (640, 480, 30))
         self.assertEqual(settings.lens_position, 20)
+        self.assertEqual(settings.crop_size, 384)
         self.assertFalse(settings.camera_queue)
 
     def test_reads_tuning_options_without_rounding(self):

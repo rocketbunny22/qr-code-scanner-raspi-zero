@@ -18,7 +18,7 @@ class ScannerSettings:
     copy_mode: str = "luma"
     sensor_mode: int = -1
     decoder: str = "pyzbar"
-    crop_size: int = 320
+    crop_size: int = 384
     full_frame_interval: int = 3
     api_workers: int = 2
     persistence_queue: int = 20
