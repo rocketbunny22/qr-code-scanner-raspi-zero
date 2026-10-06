@@ -1,0 +1,2 @@
+# Optional benchmark/alternative QR decoder; existing installs keep pyzbar.
+zxing-cpp>=2.3,<4

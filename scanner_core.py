@@ -101,6 +101,10 @@ class ScanOutbox:
             )
             """
         )
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS pending_scans_due "
+            "ON pending_scans (next_attempt_at, id)"
+        )
         self._connection.commit()
 
     def close(self):
@@ -169,7 +173,7 @@ class ScanOutbox:
                 """
                 SELECT id, payload FROM pending_scans
                 WHERE next_attempt_at <= ?
-                ORDER BY id
+                ORDER BY next_attempt_at, id
                 LIMIT 1
                 """,
                 (now,),

@@ -125,6 +125,14 @@ class ScanOutboxTests(unittest.TestCase):
             (entry_id, b"badge"),
         )
 
+    def test_claims_earliest_due_before_later_retry(self):
+        later_id = self.outbox.enqueue(b"later", now=0, initial_delay=20)
+        earlier_id = self.outbox.enqueue(b"earlier", now=0, initial_delay=10)
+        self.assertEqual(self.outbox.claim_due(now=20, lease_seconds=30),
+                         (earlier_id, b"earlier"))
+        self.assertEqual(self.outbox.claim_due(now=20, lease_seconds=30),
+                         (later_id, b"later"))
+
     def test_retries_with_capped_exponential_backoff(self):
         entry_id = self.outbox.enqueue(b"badge", now=0, initial_delay=0)
 

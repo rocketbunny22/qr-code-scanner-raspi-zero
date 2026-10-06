@@ -15,6 +15,7 @@ The scanner continuously captures camera frames, decodes QR codes, sends the bad
 - [Provisioning a bare Raspberry Pi](#provisioning-a-bare-raspberry-pi)
 - [Installation](#installation)
 - [Configuration](#configuration)
+- [Performance measurement and tuning](#performance-measurement-and-tuning)
 - [Running the scanner](#running-the-scanner)
 - [Status indicators](#status-indicators)
 - [Operations and troubleshooting](#operations-and-troubleshooting)
@@ -23,8 +24,8 @@ The scanner continuously captures camera frames, decodes QR codes, sends the bad
 
 ## What it does
 
-1. Starts the Pi camera at 640 x 480 pixels and 30 FPS.
-2. Uses a fixed manual camera lens position of `20.0`.
+1. Starts the Pi camera at a configurable resolution and frame rate (640 x 480 pixels and 30 FPS by default).
+2. Uses configurable manual focus (`20.0` by default) and automatic exposure unless overridden.
 3. Continuously captures frames into a one-frame latest-value buffer and decodes QR codes from every frame the processor can consume.
 4. Accepts QR payloads that are URLs containing `company_id` and `attendee` query-string parameters.
 5. Sends those values, plus the configured scanner identifier, to the OFG API using an authenticated JSON `POST` request.
@@ -95,15 +96,16 @@ rpi-ws281x
 Camera frame
     -> YUV luminance plane
     -> latest-frame buffer
-    -> pyzbar QR-only decode
+    -> centre-first QR-only decode (pyzbar or optional ZXing)
     -> parse company_id and attendee from the QR URL
-    -> one of two authenticated API workers
+    -> bounded persistence queue -> durable SQLite outbox
+    -> one of two authenticated API workers (configurable)
     -> non-blocking traffic-light + LED-strip + buzzer result
 ```
 
-Camera capture runs continuously in one persistent worker instead of creating a thread for every frame. Its queue holds only one frame: if QR decoding is temporarily slower than the camera, an old unprocessed frame is replaced by the newest frame instead of building a latency-producing backlog. Resolution remains 640 x 480 and the decoder remains restricted to QR codes.
+Camera capture runs continuously in one persistent worker. Its queue holds only one frame: if QR decoding is slower than the camera, an old unprocessed frame is replaced by the newest frame. The default capture path copies only the luminance plane from a mapped camera buffer and releases that buffer before decoding. Picamera2's internal completed-frame queue is disabled by default. The decoder tries a central 320 x 320 crop, searches the full frame immediately on a miss, and also searches the full frame every third processed frame even when the crop succeeds. This preserves discovery of additional, off-centre badges.
 
-API requests and buzzer patterns have independent workers. A slow network response, sound, or five-second success hold therefore does not pause detection of the next badge. Two API workers can process separate badges concurrently, and each worker reuses its HTTP session and underlying connection where the server permits it.
+Persistence, API requests, operator feedback, and buzzer patterns have independent workers. A database commit, slow network response, sound, or five-second success hold therefore does not run on the decoding thread. Two API workers can process separate badges concurrently, and each worker reuses its HTTP session and underlying connection where the server permits it. Feedback can present a completed API result while the next frame is being decoded.
 
 The program allows five seconds for the camera worker to supply a frame. If the camera does not return a usable frame, it shows a red LED, failure tone, and `STARTUP FAIL / Camera error` for ten seconds before exiting with an error. The installed `systemd` service can then restart it automatically.
 
@@ -129,9 +131,13 @@ Missing either parameter produces a local `invalid` result without making an API
 
 ### Duplicate behavior
 
-Every queued QR payload is added to a bounded in-memory history. A code that remains in the camera view is ignored after its first detection rather than repeatedly generating duplicate sounds and indicator updates. After it has been absent for at least `QR_REARM_SECONDS`, presenting it again shows one `DUPLICATE` result and does not call the API.
+Payloads waiting for persistence are tracked separately from accepted scans. A successfully saved payload is added to a bounded in-memory history. A code that remains in view is ignored after its first accepted detection rather than repeatedly generating duplicate sounds and indicator updates. After it has been absent for at least `QR_REARM_SECONDS`, presenting it again shows one `DUPLICATE` result and does not call the API.
 
 Definitive outcomes such as `checked_in`, `not_found`, and `invalid` remain deduplicated for up to 24 hours, with a maximum history of 10,000 payloads. Every valid scan is first stored in `scanner_outbox.sqlite3`, which is private to the scanner account and survives a restart or power loss. If the API is unavailable or returns an unusable response, the scanner keeps the badge in that outbox and retries in the background with capped exponential backoff (5 seconds through 5 minutes). The entry is removed only after a definitive API response. The outbox is intentionally ignored by Git and must be treated as sensitive badge data.
+
+A RAM queue reservation is not acceptance: `SAVED / Checking badge` appears only after the SQLite commit succeeds. A full persistence queue produces `BUSY / Try badge again`; that presentation has not been saved and remains eligible for retry. Persistence failures likewise do not acknowledge acceptance. Normal shutdown attempts to drain the RAM queue to disk; an abrupt power loss can lose scans that have not yet reached `SAVED`.
+
+Run only one scanner process per outbox database. API delivery is at least once: a timeout or crash after the server accepts a request can cause it to be replayed. The server must make repeated check-ins idempotent; this client cannot guarantee exactly-once delivery.
 
 ## API contract
 
@@ -154,17 +160,17 @@ User-Agent: OFG-QR-Scanner/1.0
 X-Scanner-Token: $OFG_API_KEY
 ```
 
-The request has a 10-second timeout. The response body must be JSON. The scanner selects its user-visible result from the response `status` field:
+Requests default to a 3.05-second connection timeout and a 10-second read timeout, configurable separately. These are not a total request deadline. The response body must be JSON. The scanner selects its user-visible result from the response `status` field:
 
 | API/result status | Kiosk result |
 | --- | --- |
 | `checked_in` | Green LED, two rising beeps, `CHECKED IN` with the response `attendee` value. This result is scheduled for up to five seconds without blocking the next scan. |
 | `not_found` | Red LED, low failure tone, `NOT FOUND / See kiosk`. |
 | `invalid` | Red LED, low failure tone, `INVALID QR / Missing data`. |
-| `queued` | Yellow LED, no failure tone, `QUEUED / Will sync`. This is shown when a valid scan cannot be sent immediately; it remains in the local outbox for background retry. |
+| `queued` | Yellow LED, no failure tone, `QUEUED / Will sync`. This follows a retryable API result; the saved scan remains in the local outbox for background retry. |
 | `offline` | Internal retryable result produced locally for request failures, including timeout. It is stored in the outbox rather than presented as a final badge outcome. |
 | `bad_response` | Internal retryable result produced when a response is unusable. It is stored in the outbox rather than presented as a final badge outcome. |
-| `busy` | Red LED, low failure tone, `BUSY / Try badge again`. This is produced locally if the bounded request queue is full. |
+| `busy` | Red LED, low failure tone, `BUSY / Try badge again`. The bounded persistence queue is full and this presentation has not been saved. |
 | Any other or absent status | Red LED, low failure tone, `ERROR / See kiosk`. |
 
 For successful check-ins, the API should return the attendee name/value in an `attendee` property for operational logs.
@@ -310,16 +316,37 @@ OFG_SCANNER_ID=scanner-1
 
 On boot, missing either value produces `STARTUP FAIL / Missing API config` for ten seconds and then exits with an error. The installed service retries automatically; correct the file and restart the service to apply it immediately.
 
+### Performance environment settings
+
+Set these optional values in `.env`; process environment values take precedence. Defaults and validation live in [`scanner_config.py`](scanner_config.py). Restart the service after changing them.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SCANNER_WIDTH` / `SCANNER_HEIGHT` | `640` / `480` | Positive, even YUV capture dimensions. |
+| `SCANNER_FPS` | `30` | Requested frame rate; verify the actual rate in metrics. |
+| `SCANNER_LENS_POSITION` | `20.0` | Manual focus position; calibrate at the presentation distance. |
+| `SCANNER_EXPOSURE_US` | `0` | Automatic exposure at zero; positive values request manual exposure in microseconds. |
+| `SCANNER_GAIN` | `1.0` | Analogue gain when manual exposure is enabled. |
+| `SCANNER_BUFFER_COUNT` | `4` | Camera buffers; minimum two. |
+| `SCANNER_CAMERA_QUEUE` | `false` | Picamera2 completed-frame queue; accepts `true`/`false` or `1`/`0`. |
+| `SCANNER_COPY_MODE` | `luma` | Copy mapped luma only; `array` uses the full-array capture path for comparison. |
+| `SCANNER_SENSOR_MODE` | `-1` | Automatic sensor selection; a nonnegative index selects from `camera.sensor_modes`. |
+| `SCANNER_DECODER` | `pyzbar` | QR backend: `pyzbar` or separately installed `zxingcpp`. |
+| `SCANNER_CROP_SIZE` | `320` | Central square size, clipped to frame dimensions; `0` disables cropping. |
+| `SCANNER_FULL_FRAME_INTERVAL` | `3` | Full search every N processed frames even on crop hits; misses always search immediately. |
+| `SCANNER_API_WORKERS` | `2` | Concurrent API workers with persistent HTTP sessions. |
+| `SCANNER_PERSISTENCE_QUEUE` | `20` | Maximum scans waiting in RAM to be saved. Saved outage backlog remains on disk. |
+| `SCANNER_CONNECT_TIMEOUT` / `SCANNER_READ_TIMEOUT` | `3.05` / `10` | HTTP connection and read timeouts in seconds, not a total deadline. |
+| `SCANNER_METRICS_INTERVAL` | `30` | Seconds between metric reports; `0` disables reporting. |
+
+Invalid settings fail startup explicitly. Camera startup logs the negotiated main/sensor configuration and available control ranges. A selected sensor mode must support the requested FPS; exposure cannot exceed the requested frame period. Camera hardware and driver constraints still need validation on the Pi.
+
 ### Code-level settings
 
 These values live in [`qr_code_scanner.py`](qr_code_scanner.py):
 
 | Setting | Current value | Effect |
 | --- | ---: | --- |
-| `SCANNER_ID` | `scanner-1` | Included in every API request. Assign a distinct value per physical kiosk if the API uses it for attribution. |
-| `WIDTH` / `HEIGHT` | `640` / `480` | Camera capture resolution. |
-| Frame rate | `30` | Requested video configuration rate. |
-| `LensPosition` | `20.0` | Fixed manual focus position for Camera Module 3 Wide. |
 | `LED_BRIGHTNESS` | `1.0` | PWM LED duty-cycle value. |
 | `BUZZER_VOLUME` | `0.5` | PWM buzzer duty-cycle value. |
 | `STRIP_LED_COUNT` | `60` | Number of addressable LEDs driven on GPIO 18. |
@@ -329,15 +356,76 @@ These values live in [`qr_code_scanner.py`](qr_code_scanner.py):
 | `RESULT_HOLD_SECONDS` | `0.8` | Maximum non-success feedback hold when a newer scan does not replace it. |
 | `CAMERA_CAPTURE_TIMEOUT_SECONDS` | `5` | Camera-frame timeout before a startup failure is shown. |
 | `QR_REARM_SECONDS` | `0.4` | Minimum absence interval before the same visible payload counts as a new presentation. |
-| `API_WORKER_COUNT` | `2` | Maximum number of different badge requests processed concurrently. |
-| `API_QUEUE_SIZE` | `20` | Maximum number of requests waiting behind the API workers. |
 | `OUTBOX_RETRY_BASE_SECONDS` / `OUTBOX_RETRY_MAX_SECONDS` | `5` / `300` | Initial and maximum delay for replaying queued scans after a retryable API failure. |
 | `SEEN_PAYLOAD_LIMIT` | `10000` | Maximum number of definitive badge outcomes retained. |
 | `SEEN_PAYLOAD_TTL_SECONDS` | `86400` | How long definitive badge outcomes remain deduplicated. |
 
-`SCANNER_ID` can be overridden without changing source by setting `OFG_SCANNER_ID` in `.env`.
+The scanner identifier defaults to `scanner-1`; set `OFG_SCANNER_ID` in `.env` to assign a distinct identifier per kiosk.
 
 The result hold values control feedback duration only. They no longer suspend camera capture or QR decoding.
+
+## Performance measurement and tuning
+
+The software exposes comparisons; no speedup has been measured on the target Pi yet. Begin with the existing 30 FPS, focus `20.0`, and automatic exposure. Keep resolution, badge position, lighting, and badge examples consistent while changing one setting at a time. Include moving, angled, small, reflective, and phone-displayed codes; a faster failed decode does not improve check-in speed.
+
+### Read latency measurements
+
+Service logs emit `METRICS:` JSON every 30 seconds by default. Each metric reports `p50_ms`, `p95_ms`, a rolling `samples` count (up to the latest 2,048 observations), and `count` since process startup. Metrics contain no badge payloads.
+
+| Metric | Measures |
+| --- | --- |
+| `camera_capture` | Camera request wait plus frame extraction. |
+| `sensor_frame_interval` | Time between captured sensor timestamps; use to assess delivered FPS. |
+| `frame_buffer_wait` | Time since request acquisition until decoding starts, including extraction and latest-frame buffering. |
+| `sensor_frame_age` / `sensor_to_decode` | Sensor timestamp to decode start / completion when metadata is available. |
+| `decode` | Crop and any full-frame QR search. |
+| `persist_queue_wait` / `persistence` | Wait before persistence / database save work. |
+| `decode_to_saved` | Decode completion to durable acceptance. |
+| `api_queue_wait` / `api` | Saved scan to API worker / request duration. |
+| `decode_to_result` | Decode completion through API result and outbox update. |
+| `feedback_queue_wait` / `decode_to_feedback` | Feedback worker wait / decode completion through result presentation. |
+
+Decode-to-result/feedback samples can include retryable outcomes, not just successful check-ins. Original detection timestamps are unavailable for recovered scans, retries, and entries whose bounded timing metadata has expired. Sensor age is not physical badge-presentation latency: measuring presentation-to-save requires an external timed trial. Compare decode-to-saved separately from server-confirmed feedback to distinguish local processing from network/server delay.
+
+### Capture and compare decoders
+
+Stop the scanner service before any standalone camera command. In the activated `.venv`, install the optional decoder:
+
+```bash
+python -m pip install -r requirements-performance.txt
+sudo systemctl stop qrscanner.service
+python capture_benchmark_frames.py /tmp/qr-benchmark --frames 60
+python benchmark_decoder.py /tmp/qr-benchmark --crop-size 0
+python benchmark_decoder.py /tmp/qr-benchmark --crop-size 320 --full-frame-interval 3
+sudo systemctl start qrscanner.service
+```
+
+The capture directory must not already exist. Keep captures outside the repository: they can contain private badge data. The tool creates a private directory (`0700`) and files (`0600`), uses the same `.env` camera settings as the scanner, records only the requested number of grayscale `.npy` frames, and never submits check-ins. Delete the captures after testing. Disk writes affect capture spacing, so use these files to compare decoder work on identical images; use live metrics for camera throughput.
+
+The benchmark reports median/p95 decode time, frames with reads, payload read counts, and agreement between backends. Agreement does not establish correctness without labelled ground truth. Unavailable backends are reported explicitly. Compare `SCANNER_CROP_SIZE=0` against `320` in live scanning too. To select ZXing after testing, set `SCANNER_DECODER=zxingcpp` in `.env` and restart; the default remains pyzbar. A missing selected backend fails startup instead of silently changing decoder.
+
+### Camera experiments
+
+List supported sensor modes while the service is stopped:
+
+```bash
+sudo systemctl stop qrscanner.service
+python - <<'PY'
+from picamera2 import Picamera2
+camera = Picamera2()
+try:
+    for index, mode in enumerate(camera.sensor_modes):
+        print(index, mode)
+finally:
+    camera.close()
+PY
+```
+
+Choose a mode by its reported index, resolution, bit depth, and maximum FPS; indices depend on the camera/driver. Test `SCANNER_FPS=60` with a suitable `SCANNER_SENSOR_MODE`, then check actual sensor intervals and read reliability. Higher requested FPS alone does not guarantee more successful scans.
+
+With sufficient lighting, experiment with `SCANNER_EXPOSURE_US=2000` (2 ms) and `SCANNER_GAIN=1.0`, adjusting gain and focus against real badges. Manual short exposures can reduce motion blur but underexposure can reduce reads. Restore `SCANNER_EXPOSURE_US=0` for automatic exposure. Defaults intentionally preserve the previous exposure/focus behavior.
+
+Compare `SCANNER_COPY_MODE=luma` with `array` and, if needed, `SCANNER_CAMERA_QUEUE=false` with `true` using sensor age and decode timings. Each path releases camera buffers before decoding. Restart `qrscanner.service` after editing `.env`; stop it again before standalone capture. Increase API worker count only when measured queue wait warrants it and the server supports additional concurrency.
 
 ## Running the scanner
 
@@ -351,7 +439,7 @@ source .venv/bin/activate
 python qr_code_scanner.py
 ```
 
-The program logs its `.env` path, whether the API URL and key were loaded, non-reversible QR fingerprints, API outcomes, and per-request completion time. Press `Ctrl+C` to exit when a keyboard and terminal are attached. The process turns off LEDs/buzzer and stops the camera and background workers during normal shutdown.
+The program logs its `.env` path, whether the API URL and key were loaded, non-reversible QR fingerprints, camera configuration, durable saves, API outcomes, and latency metrics. Press `Ctrl+C` to exit when a keyboard and terminal are attached. The process turns off LEDs/buzzer and stops the camera and background workers during normal shutdown. Stop the service before launching an interactive instance; one process must own the camera and outbox.
 
 ### `systemd` service
 
@@ -406,11 +494,12 @@ After changing `scanner_init.sh` or any generated unit value, run `sudo systemct
 | Situation | Light state | Sound |
 | --- | --- | --- |
 | Ready | Traffic lights and strip off | Two rising startup tones only at launch |
-| Processing a new QR | Yellow traffic light; strip off | None before API result |
+| Durably saved QR, awaiting API | Yellow traffic light; strip off | None before API result |
 | Checked in | Green traffic light; one-second green strip | Two short rising tones |
 | Duplicate payload | Green traffic light; one-second green strip | One medium tone |
 | Badge not found or invalid QR | Red traffic light and strip | One low long tone |
-| Queued while offline or busy | Yellow traffic light; strip off | None |
+| Saved scan queued after retryable API failure | Yellow traffic light; strip off | None |
+| Persistence queue full; scan not saved | Red traffic light and strip | One low long tone; retry badge |
 | Unexpected API status or startup failure | Red traffic light and strip | One low long tone |
 
 ## Operations and troubleshooting
@@ -431,7 +520,7 @@ After changing `scanner_init.sh` or any generated unit value, run `sudo systemct
    ```
 
 4. Confirm the installed system has `python3-picamera2` and that the virtual environment uses system site packages.
-5. Adjust `LensPosition` only after validating the physical scan distance and lighting. The configured manual value is `20.0`; it does not continuously autofocus.
+5. Adjust `SCANNER_LENS_POSITION` only after validating the physical scan distance and lighting. The default manual value is `20.0`; it does not continuously autofocus. Check the logged supported range if startup rejects it.
 
 ### LEDs or buzzer do not work
 
@@ -472,29 +561,38 @@ sudo systemctl stop qrscanner.service
 
 ```text
 .
-├── qr_code_scanner.py  # Scanner application: camera, decoding, API, and GPIO
-├── scanner_core.py     # Hardware-independent parsing and duplicate-history helpers
-├── scanner_init.sh     # Raspberry Pi provisioning and systemd installation
-├── requirements.txt    # Python dependency constraints
-├── tests/              # Hardware-independent unit tests
-└── README.md           # Deployment and operations documentation
+├── qr_code_scanner.py           # Application wiring, API contract, and GPIO
+├── scanner_core.py              # Parsing, duplicate history, and SQLite outbox
+├── scanner_config.py            # Validated SCANNER_* settings
+├── scanner_camera.py            # Shared camera setup and latest-luma capture
+├── scanner_decode.py            # QR backend adapters and crop/fallback search
+├── scanner_pipeline.py          # Asynchronous persistence and API delivery
+├── scanner_feedback.py          # Independent feedback and metric reporting
+├── scanner_metrics.py           # Bounded latency samples and percentiles
+├── capture_benchmark_frames.py  # Explicit private capture for benchmarking
+├── benchmark_decoder.py         # Compare decoders on identical saved images
+├── scanner_init.sh              # Pi provisioning and systemd installation
+├── requirements.txt             # Runtime dependency constraints
+├── requirements-performance.txt # Optional ZXing backend
+├── tests/                       # Hardware-independent unit tests
+└── README.md                    # Deployment and operations documentation
 ```
 
 ## Current implementation notes
 
-- The program decodes `ZBarSymbol.QRCODE` only; barcodes and other ZBar symbologies are intentionally ignored.
-- Camera capture and QR decoding run concurrently. The decoder examines the freshest full-resolution frame available and stale unprocessed frames are discarded.
-- API requests use two persistent-session workers, allowing the next QR to be detected and submitted while another request is still in flight.
-- The client sends one HTTP request per newly seen payload and does not inspect the HTTP status itself if the server returned JSON; its visible outcome is selected from the JSON `status` field.
+- Both decoder backends search QR codes only and preserve payload bytes for deduplication.
+- Capture and decoding run concurrently. Centre-first search uses the freshest available frame, with immediate/periodic full-frame fallback; stale unprocessed frames are discarded.
+- API requests default to two persistent-session workers; SQLite persistence and operator feedback also run independently of decoding.
+- Every delivery is claimed from the outbox. Retryable outcomes are replayed with backoff; server check-ins must be idempotent. Visible outcomes are selected from the JSON `status` field.
 - The scanner logs a short SHA-256 fingerprint instead of raw QR contents or complete API results.
 - Buzzer sequences run outside the scanner loop so sound cannot delay badge detection.
-- API credentials and scanner ID come from `.env`; camera settings, hardware pins, timing, sound, brightness, and focus remain source configuration.
-- Hardware-independent helpers have a standard-library unit test suite. Run it on a development machine with:
+- API credentials, scanner ID, camera controls, decoder policy, timeouts, and worker settings come from `.env`. Hardware pins, sound, brightness, and feedback hold times remain source configuration.
+- Hardware-independent helpers use `unittest`; image tests require NumPy and skip when it is unavailable. Run on a development machine with:
 
   ```bash
   python3 -m unittest discover -s tests -v
   ```
 
-  A safe syntax-only check for the complete hardware runtime is `python3 -m py_compile qr_code_scanner.py scanner_core.py`.
+  A safe syntax-only check for all Python modules and diagnostics is `python3 -m py_compile *.py tests/*.py`.
 
   Running the scanner itself requires Raspberry Pi camera/GPIO dependencies and attached hardware.
