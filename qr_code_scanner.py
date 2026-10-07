@@ -57,7 +57,6 @@ BUZZER_PIN = 26       # physical pin 37
 STRIP_PIN = 18
 STRIP_LED_COUNT = 60
 STRIP_BRIGHTNESS = 32  # 0-255, about 12.5%
-STRIP_FLASH_SECONDS = 1.0
 
 # ----------------------------
 # LED / buzzer setup
@@ -66,8 +65,10 @@ USE_LIGHTS = True
 USE_STRIP = True
 USE_BUZZER = True
 LED_BRIGHTNESS = 1.0
-BUZZER_VOLUME = 0.5
+BUZZER_VOLUME = 0.5  # PWM duty cycle, not a linear volume control.
+BUZZER_SCAN_FREQUENCY = 4000  # Selected by listening at the installed kiosk.
 SUCCESS_HOLD_SECONDS = 5
+STRIP_FLASH_SECONDS = 0.4
 RESULT_HOLD_SECONDS = 0.8
 CAMERA_CAPTURE_TIMEOUT_SECONDS = 5
 QR_REARM_SECONDS = 0.4
@@ -165,51 +166,37 @@ except Exception as e:
     print("LED strip disabled:", repr(e))
 
 
-def strip_set(red, green, blue):
+def strip_set(red, green, blue, *, expected_generation=None):
     global strip_generation
-
     if not USE_STRIP or status_strip is None:
         return None
 
     with strip_lock:
+        if expected_generation is not None and expected_generation != strip_generation:
+            return None
         strip_generation += 1
-        generation = strip_generation
         color = Color(red, green, blue)
 
         for i in range(status_strip.numPixels()):
             status_strip.setPixelColor(i, color)
 
         status_strip.show()
-
-    return generation
+        return strip_generation
 
 
 def strip_off():
     strip_set(0, 0, 0)
 
 
-def strip_flash(red, green, blue, duration=STRIP_FLASH_SECONDS):
-    generation = strip_set(red, green, blue)
-
+def strip_flash_green():
+    generation = strip_set(0, 255, 0)
     if generation is None:
         return
-
-    def finish_flash():
-        global strip_generation
-
-        with strip_lock:
-            if generation != strip_generation:
-                return
-
-            strip_generation += 1
-            color = Color(0, 0, 0)
-
-            for i in range(status_strip.numPixels()):
-                status_strip.setPixelColor(i, color)
-
-            status_strip.show()
-
-    timer = threading.Timer(duration, finish_flash)
+    # A newer flash or shutdown must take precedence over this timer.
+    timer = threading.Timer(
+        STRIP_FLASH_SECONDS,
+        lambda: strip_set(0, 0, 0, expected_generation=generation),
+    )
     timer.daemon = True
     timer.start()
 
@@ -223,9 +210,8 @@ def strip_test_marker(name, red, green, blue):
     time.sleep(1)
 
 
-# Turn the strip blue as soon as its driver is ready.
-# It remains blue through camera and API worker initialization.
-strip_set(0, 0, 255)
+# Keep the strip dark between scan feedback flashes.
+strip_off()
 
 
 try:
@@ -237,7 +223,7 @@ try:
         initial_value=0,
         frequency=1000,
     )
-    strip_test_marker("after strip init - BLUE", 0, 0, 255)
+    strip_test_marker("after strip init - OFF", 0, 0, 0)
 
 except Exception as e:
     USE_BUZZER = False
@@ -260,13 +246,14 @@ def lights_off():
 
 
 def signal_ready():
-    # Scanner is loaded and waiting for a badge.
-    lights_off()
+    # Keep the strip off while waiting for a badge.
+    traffic_lights_off()
+    strip_off()
 
 
 def signal_processing():
     # Keep the existing traffic-light yellow processing indication.
-    # The addressable strip stays off while the API request is running.
+    # Keep the strip off while the API request is running.
     traffic_lights_off()
 
     if USE_LIGHTS:
@@ -281,18 +268,17 @@ def signal_success():
     if USE_LIGHTS:
         green_led.value = LED_BRIGHTNESS
 
-    # Green flash without blocking the scanner.
-    strip_flash(0, 255, 0)
+    # API confirmation must not interrupt an immediate capture flash.
+
+
+def signal_saved():
+    signal_success()
+    strip_flash_green()
 
 
 def signal_duplicate():
-    traffic_lights_off()
-
-    if USE_LIGHTS:
-        green_led.value = LED_BRIGHTNESS
-
-    # Green flash without blocking the scanner.
-    strip_flash(0, 255, 0)
+    # A locally seen badge may still be awaiting server confirmation.
+    signal_saved()
 
 
 def signal_failure():
@@ -301,7 +287,7 @@ def signal_failure():
     if USE_LIGHTS:
         red_led.value = LED_BRIGHTNESS
 
-    strip_set(255, 0, 0)
+    strip_off()
 
 
 def play_tone(frequency=1000, duration=0.12):
@@ -314,18 +300,18 @@ def play_tone(frequency=1000, duration=0.12):
     buzzer.off()
 
 
-def play_success_sound():
-    play_tone(1200, 0.08)
+def play_saved_sound():
+    play_tone(BUZZER_SCAN_FREQUENCY, 0.08)
     time.sleep(0.02)
-    play_tone(1600, 0.05)
+    play_tone(BUZZER_SCAN_FREQUENCY, 0.05)
 
 
 def play_failure_sound():
-    play_tone(350, 0.35)
+    play_tone(BUZZER_SCAN_FREQUENCY, 0.35)
 
 
 def play_duplicate_sound():
-    play_tone(900, 0.2)
+    play_tone(BUZZER_SCAN_FREQUENCY, 0.2)
 
 
 def play_startup_sound():
@@ -341,7 +327,7 @@ sound_stop_event = threading.Event()
 def sound_worker():
     sounds = {
         "startup": play_startup_sound,
-        "success": play_success_sound,
+        "saved": play_saved_sound,
         "failure": play_failure_sound,
         "duplicate": play_duplicate_sound,
     }
@@ -471,7 +457,6 @@ def present_checkin_result(scan_id, result, elapsed_seconds):
     if status == "checked_in":
         print(f"Scan {scan_id} checked in")
         signal_success()
-        queue_sound("success")
         attendee = str(result.get("attendee") or "")[:30]
         show_status("CHECKED IN", attendee)
         return SUCCESS_HOLD_SECONDS
@@ -529,22 +514,29 @@ def main():
     exit_code = 0
     metrics = Metrics()
     state_events = queue.SimpleQueue()
+    latest_feedback_id = None
 
     def ready():
         signal_ready()
         show_status("READY", "Scan next badge")
 
     def present_event(event):
+        nonlocal latest_feedback_id
+
         kind = event["kind"]
         scan_label = event.get("scan_id")
         if scan_label is None and event.get("raw_payload") is not None:
             scan_label = payload_fingerprint(event["raw_payload"])
         if kind == "accepted":
-            signal_processing()
-            show_status("SAVED", "Checking badge")
+            latest_feedback_id = event["scan_id"]
+            signal_saved()
+            queue_sound("saved")
+            show_status("SAVED", "Scan next badge")
             print(f"Scan {scan_label} durably saved in {event['elapsed']:.3f}s")
+            metrics.observe("decode_to_saved_feedback", time.monotonic() - event["detected_at"])
             return RESULT_HOLD_SECONDS
         if kind == "duplicate":
+            latest_feedback_id = None
             signal_duplicate()
             queue_sound("duplicate")
             show_status("DUPLICATE", "Already scanned")
@@ -553,6 +545,7 @@ def main():
             print(f"Scan worker error: {event['stage']} / {event['error']}")
             if event.get("scan_id") is None:
                 return None
+            latest_feedback_id = None
             # Disk failure before saving must never be presented as acceptance.
             result = {"status": "outbox_error", "success": False}
             return present_checkin_result(scan_label, result, 0)
@@ -560,6 +553,15 @@ def main():
             result = event["result"]
             if event.get("scan_id") is None:
                 print(f"Background QR {scan_label} status {result.get('status')!r}")
+                return None
+            if "raw_payload" not in event:
+                # A new local validation/BUSY outcome supersedes older feedback.
+                latest_feedback_id = event["scan_id"]
+            if event["scan_id"] != latest_feedback_id and (
+                result.get("status") in {"checked_in", "queued"}
+                or is_retryable_result(result)
+            ):
+                print(f"Scan {scan_label} completed in background with status {result.get('status')!r}")
                 return None
             if is_retryable_result(result):
                 result = {"status": "queued", "retry_status": result.get("status")}
@@ -606,7 +608,7 @@ def main():
                 for key in ("ExposureTime", "AnalogueGain", "LensPosition", "FrameDuration")
             })
             init_status_strip()
-            strip_test_marker("after hardware init - GREEN", 0, 255, 0)
+            strip_test_marker("after hardware init - OFF", 0, 0, 0)
         except Exception as error:
             hold_startup_failure("STARTUP FAIL", "Camera error", error)
 
@@ -632,6 +634,8 @@ def main():
 
         print(f"Scanner started: {settings.decoder}, crop={settings.crop_size}, "
               f"full-frame interval={settings.full_frame_interval}")
+        print("Capture feedback: local durable save; API confirmation runs in background")
+        print(f"Scan illumination: off with green capture flashes at brightness {STRIP_BRIGHTNESS}/255")
         seen_payloads = SeenPayloadCache(SEEN_PAYLOAD_LIMIT, SEEN_PAYLOAD_TTL_SECONDS)
         pending_payloads = set()
         payload_last_seen = {}

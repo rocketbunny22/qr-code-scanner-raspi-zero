@@ -1,6 +1,8 @@
 """Exercise durable delivery without importing Raspberry Pi dependencies."""
 
+from contextlib import closing
 import queue
+import sqlite3
 import tempfile
 import threading
 import time
@@ -63,6 +65,34 @@ class ScanPipelineTests(unittest.TestCase):
         self.assertEqual(self.event("result")["result"]["status"], "success")
         self.assertEqual(self.outbox.count(), 0)
 
+    def test_two_scans_are_durably_accepted_while_api_is_blocked(self):
+        gate = self.gate()
+        request_started = threading.Event()
+
+        def blocked_send(payload, session):
+            request_started.set()
+            gate.wait()
+            return {"status": "success"}
+
+        self.start(send=blocked_send, worker_count=1)
+        self.assertTrue(self.pipeline.submit(1, b"first", time.monotonic()))
+        self.assertTrue(request_started.wait(3))
+        first = self.events.get(timeout=3)
+        self.assertEqual((first["kind"], first["scan_id"]), ("accepted", 1))
+
+        # Even with the only API worker blocked, the next badge is saved and
+        # acknowledged immediately by the independent persistence worker.
+        self.assertTrue(self.pipeline.submit(2, b"second", time.monotonic()))
+        second = self.events.get(timeout=3)
+        self.assertEqual((second["kind"], second["scan_id"]), ("accepted", 2))
+        with closing(sqlite3.connect(self.outbox.database_path)) as reader:
+            rows = reader.execute("SELECT payload FROM pending_scans ORDER BY id").fetchall()
+        self.assertEqual(rows, [(b"first",), (b"second",)])
+        with self.assertRaises(queue.Empty):
+            self.events.get_nowait()
+        self.assertFalse(gate.is_set())
+        gate.set()
+
     def test_bounded_queue_and_duplicate_reservation_do_not_block_submit(self):
         gate = self.gate()
         entered = threading.Event()
@@ -88,8 +118,12 @@ class ScanPipelineTests(unittest.TestCase):
         self.start()
         with patch.object(self.outbox, "enqueue", side_effect=OSError("disk full")):
             self.assertTrue(self.pipeline.submit(1, b"badge", time.monotonic()))
-            self.assertEqual(self.event("error")["stage"], "persistence")
+            failure = self.events.get(timeout=3)
+            self.assertEqual((failure["kind"], failure["stage"]), ("error", "persistence"))
             self.pipeline._queue.join()
+            with self.assertRaises(queue.Empty):
+                self.events.get_nowait()
+            self.assertEqual(self.outbox.count(), 0)
         self.assertTrue(self.pipeline.submit(2, b"badge", time.monotonic()))
         self.assertEqual(self.event("accepted")["scan_id"], 2)
 

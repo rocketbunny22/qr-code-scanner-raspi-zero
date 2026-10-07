@@ -11,11 +11,21 @@ def configure_camera(camera, settings):
     from libcamera import controls
 
     settings.validate()
-    requested_controls = {
-        "FrameRate": settings.fps,
-        "AfMode": controls.AfModeEnum.Manual,
-        "LensPosition": settings.lens_position,
-    }
+    requested_controls = {"FrameRate": settings.fps}
+    focus_settings = {"mode": settings.focus_mode}
+    if settings.focus_mode == "manual":
+        requested_controls.update({
+            "AfMode": controls.AfModeEnum.Manual,
+            "LensPosition": settings.lens_position,
+        })
+        focus_settings["lens_position"] = settings.lens_position
+    else:
+        requested_controls.update({
+            "AfMode": controls.AfModeEnum.Continuous,
+            "AfRange": getattr(controls.AfRangeEnum, settings.af_range.capitalize()),
+            "AfSpeed": getattr(controls.AfSpeedEnum, settings.af_speed.capitalize()),
+        })
+        focus_settings.update(range=settings.af_range, speed=settings.af_speed)
     if settings.exposure_us > 0:
         requested_controls.update({
             "AeEnable": False,
@@ -58,6 +68,7 @@ def configure_camera(camera, settings):
                 if maximum is not None and value > maximum:
                     raise ValueError(f"Requested {name} {value} exceeds camera maximum {maximum}")
     configuration = camera.camera_configuration()
+    print(f"Camera focus settings: {focus_settings}")
     print(f"Camera main configuration: {configuration.get('main')}")
     print(f"Camera sensor configuration: {configuration.get('sensor')}")
     return configuration

@@ -11,6 +11,9 @@ class ScannerSettings:
     height: int = 480
     fps: float = 30.0
     lens_position: float = 20.0
+    focus_mode: str = "manual"
+    af_range: str = "full"
+    af_speed: str = "fast"
     exposure_us: int = 0
     gain: float = 1.0
     buffer_count: int = 4
@@ -71,3 +74,9 @@ class ScannerSettings:
             raise ValueError("SCANNER_DECODER must be pyzbar or zxingcpp")
         if self.copy_mode not in {"luma", "array"}:
             raise ValueError("SCANNER_COPY_MODE must be luma or array")
+        if self.focus_mode not in {"manual", "continuous"}:
+            raise ValueError("SCANNER_FOCUS_MODE must be manual or continuous")
+        if self.af_range not in {"normal", "macro", "full"}:
+            raise ValueError("SCANNER_AF_RANGE must be normal, macro, or full")
+        if self.af_speed not in {"normal", "fast"}:
+            raise ValueError("SCANNER_AF_SPEED must be normal or fast")

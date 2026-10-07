@@ -15,8 +15,13 @@ from scanner_config import ScannerSettings
 
 class ConfigureCameraTests(unittest.TestCase):
     def setUp(self):
+        self.controls = SimpleNamespace(
+            AfModeEnum=SimpleNamespace(Manual=0, Continuous=2),
+            AfRangeEnum=SimpleNamespace(Normal=0, Macro=1, Full=2),
+            AfSpeedEnum=SimpleNamespace(Normal=0, Fast=1),
+        )
         fake_libcamera = SimpleNamespace(
-            controls=SimpleNamespace(AfModeEnum=SimpleNamespace(Manual=0)),
+            controls=self.controls,
         )
         self.modules = patch.dict("sys.modules", {"libcamera": fake_libcamera})
         self.modules.start()
@@ -48,6 +53,41 @@ class ConfigureCameraTests(unittest.TestCase):
         self.camera.start.assert_not_called()
         self.assertEqual(result, self.camera.camera_configuration.return_value)
         self.assertGreaterEqual(output.call_count, 2)
+        output.assert_any_call("Camera focus settings: {'mode': 'manual', 'lens_position': 20.0}")
+
+    @patch("builtins.print")
+    def test_continuous_autofocus_ranges_and_speeds_without_manual_position(self, output):
+        for af_range, range_value in (("normal", 0), ("macro", 1), ("full", 2)):
+            for af_speed, speed_value in (("normal", 0), ("fast", 1)):
+                with self.subTest(af_range=af_range, af_speed=af_speed):
+                    configure_camera(self.camera, ScannerSettings(
+                        focus_mode="continuous", af_range=af_range, af_speed=af_speed,
+                        lens_position=100,
+                    ))
+                    requested = self.camera.create_video_configuration.call_args.kwargs["controls"]
+                    self.assertEqual(requested, {
+                        "FrameRate": 30.0, "AfMode": 2,
+                        "AfRange": range_value, "AfSpeed": speed_value,
+                    })
+                    output.assert_any_call(
+                        f"Camera focus settings: {{'mode': 'continuous', "
+                        f"'range': '{af_range}', 'speed': '{af_speed}'}}"
+                    )
+        self.camera.autofocus_cycle.assert_not_called()
+        self.camera.start.assert_not_called()
+
+    @patch("builtins.print")
+    def test_manual_mode_does_not_require_continuous_autofocus_enums(self, output):
+        del self.controls.AfRangeEnum
+        del self.controls.AfSpeedEnum
+        del self.controls.AfModeEnum.Continuous
+        configure_camera(self.camera, ScannerSettings())
+
+    def test_continuous_mode_fails_when_autofocus_enum_is_unavailable(self):
+        del self.controls.AfSpeedEnum
+        with self.assertRaises(AttributeError):
+            configure_camera(self.camera, ScannerSettings(focus_mode="continuous"))
+        self.camera.configure.assert_not_called()
 
     @patch("builtins.print")
     def test_explicit_sensor_and_manual_exposure(self, output):

@@ -8,6 +8,9 @@ class ScannerSettingsTests(unittest.TestCase):
         settings = ScannerSettings.from_env({})
         self.assertEqual((settings.width, settings.height, settings.fps), (640, 480, 30))
         self.assertEqual(settings.lens_position, 20)
+        self.assertEqual(settings.focus_mode, "manual")
+        self.assertEqual(settings.af_range, "full")
+        self.assertEqual(settings.af_speed, "fast")
         self.assertEqual(settings.crop_size, 384)
         self.assertFalse(settings.camera_queue)
 
@@ -21,6 +24,25 @@ class ScannerSettingsTests(unittest.TestCase):
         self.assertEqual(settings.lens_position, 3.5)
         self.assertEqual(settings.gain, 1.5)
         self.assertTrue(settings.camera_queue)
+
+    def test_reads_continuous_autofocus_options(self):
+        settings = ScannerSettings.from_env({
+            "SCANNER_FOCUS_MODE": "continuous",
+            "SCANNER_AF_RANGE": "macro",
+            "SCANNER_AF_SPEED": "normal",
+        })
+        self.assertEqual(settings.focus_mode, "continuous")
+        self.assertEqual(settings.af_range, "macro")
+        self.assertEqual(settings.af_speed, "normal")
+
+    def test_rejects_invalid_autofocus_options(self):
+        for key, value in (
+            ("FOCUS_MODE", "auto"), ("FOCUS_MODE", "Continuous"),
+            ("AF_RANGE", "near"), ("AF_SPEED", "slow"),
+        ):
+            with self.subTest(key=key, value=value):
+                with self.assertRaisesRegex(ValueError, "SCANNER_" + key):
+                    ScannerSettings.from_env({"SCANNER_" + key: value})
 
     def test_rejects_unsafe_or_invalid_settings(self):
         for key, value in {

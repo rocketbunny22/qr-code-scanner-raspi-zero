@@ -25,7 +25,7 @@ The scanner continuously captures camera frames, decodes QR codes, sends the bad
 ## What it does
 
 1. Starts the Pi camera at a configurable resolution and frame rate (640 x 480 pixels and 30 FPS by default).
-2. Uses configurable manual focus (`20.0` by default) and automatic exposure unless overridden.
+2. Supports fixed or continuous autofocus (manual `20.0` by default) and automatic exposure unless overridden.
 3. Continuously captures frames into a one-frame latest-value buffer and decodes QR codes from every frame the processor can consume.
 4. Accepts QR payloads that are URLs containing `company_id` and `attendee` query-string parameters.
 5. Sends those values, plus the configured scanner identifier, to the OFG API using an authenticated JSON `POST` request.
@@ -44,7 +44,7 @@ There is no browser UI or camera preview. The LEDs, buzzer, and service logs are
 | Red LED | Expected | Failure/startup-failure indicator. |
 | Yellow LED | Expected | QR processing indicator. |
 | Green LED | Expected | Successful check-in and duplicate indicator. |
-| 60-pixel WS281x LED strip | Expected | Startup test colors and brief success/duplicate or steady failure feedback. |
+| 60-pixel WS281x LED strip | Expected | Brief green capture feedback; off between scans. |
 | Passive buzzer | Expected | Audible startup, success, duplicate, and failure feedback. |
 | Appropriate power supply, current-limiting resistors, and wiring | Yes | Required for the LED strip, discrete LEDs, and safe GPIO connection. |
 
@@ -135,7 +135,7 @@ Payloads waiting for persistence are tracked separately from accepted scans. A s
 
 Definitive outcomes such as `checked_in`, `not_found`, and `invalid` remain deduplicated for up to 24 hours, with a maximum history of 10,000 payloads. Every valid scan is first stored in `scanner_outbox.sqlite3`, which is private to the scanner account and survives a restart or power loss. If the API is unavailable or returns an unusable response, the scanner keeps the badge in that outbox and retries in the background with capped exponential backoff (5 seconds through 5 minutes). The entry is removed only after a definitive API response. The outbox is intentionally ignored by Git and must be treated as sensitive badge data.
 
-A RAM queue reservation is not acceptance: `SAVED / Checking badge` appears only after the SQLite commit succeeds. A full persistence queue produces `BUSY / Try badge again`; that presentation has not been saved and remains eligible for retry. Persistence failures likewise do not acknowledge acceptance. Normal shutdown attempts to drain the RAM queue to disk; an abrupt power loss can lose scans that have not yet reached `SAVED`.
+A RAM queue reservation is not acceptance: `SAVED / Scan next badge`, a green traffic-light indication, a brief green strip flash, and two short beeps occur immediately after the SQLite commit succeeds. The operator can present the next badge without waiting for a network response. This acknowledges local recording, not server validation; rejected badges can still produce a later red/error indication. A server-confirmed check-in keeps the indicator green without a second beep. Older successes and retry notices are logged without replacing newer badge feedback. A full persistence queue produces `BUSY / Try badge again`; that presentation has not been saved and remains eligible for retry. Persistence failures likewise do not acknowledge acceptance. Normal shutdown attempts to drain the RAM queue to disk; an abrupt power loss can lose scans that have not yet reached `SAVED`.
 
 Run only one scanner process per outbox database. API delivery is at least once: a timeout or crash after the server accepts a request can cause it to be replayed. The server must make repeated check-ins idempotent; this client cannot guarantee exactly-once delivery.
 
@@ -164,14 +164,14 @@ Requests default to a 3.05-second connection timeout and a 10-second read timeou
 
 | API/result status | Kiosk result |
 | --- | --- |
-| `checked_in` | Green LED, two rising beeps, `CHECKED IN` with the response `attendee` value. This result is scheduled for up to five seconds without blocking the next scan. |
-| `not_found` | Red LED, low failure tone, `NOT FOUND / See kiosk`. |
-| `invalid` | Red LED, low failure tone, `INVALID QR / Missing data`. |
+| `checked_in` | Green LED, no additional beep, `CHECKED IN` with the response `attendee` value. This result is scheduled for up to five seconds without blocking the next scan. |
+| `not_found` | Red LED, long 4 kHz failure tone, `NOT FOUND / See kiosk`. |
+| `invalid` | Red LED, long 4 kHz failure tone, `INVALID QR / Missing data`. |
 | `queued` | Yellow LED, no failure tone, `QUEUED / Will sync`. This follows a retryable API result; the saved scan remains in the local outbox for background retry. |
 | `offline` | Internal retryable result produced locally for request failures, including timeout. It is stored in the outbox rather than presented as a final badge outcome. |
 | `bad_response` | Internal retryable result produced when a response is unusable. It is stored in the outbox rather than presented as a final badge outcome. |
-| `busy` | Red LED, low failure tone, `BUSY / Try badge again`. The bounded persistence queue is full and this presentation has not been saved. |
-| Any other or absent status | Red LED, low failure tone, `ERROR / See kiosk`. |
+| `busy` | Red LED, long 4 kHz failure tone, `BUSY / Try badge again`. The bounded persistence queue is full and this presentation has not been saved. |
+| Any other or absent status | Red LED, long 4 kHz failure tone, `ERROR / See kiosk`. |
 
 For successful check-ins, the API should return the attendee name/value in an `attendee` property for operational logs.
 
@@ -254,7 +254,7 @@ sudo systemctl status qrscanner.service --no-pager
 sudo journalctl -u qrscanner.service -f
 ```
 
-Before increasing strip brightness, confirm that startup produces the blue and green strip tests without Pi undervoltage warnings, rebooting, camera failures, or LED glitches.
+Before increasing strip brightness, confirm that scan feedback works without Pi undervoltage warnings, rebooting, camera failures, or LED glitches.
 
 ## Installation
 
@@ -316,6 +316,26 @@ OFG_SCANNER_ID=scanner-1
 
 On boot, missing either value produces `STARTUP FAIL / Missing API config` for ten seconds and then exits with an error. The installed service retries automatically; correct the file and restart the service to apply it immediately.
 
+### Installed kiosk profile (2026-10-07)
+
+The installed kiosk uses the optional `zxing-cpp` package with these `.env` overrides, alongside continuous autofocus:
+
+```dotenv
+SCANNER_WIDTH=1280
+SCANNER_HEIGHT=960
+SCANNER_CROP_SIZE=768
+SCANNER_DECODER=zxingcpp
+SCANNER_FOCUS_MODE=continuous
+SCANNER_AF_RANGE=full
+SCANNER_AF_SPEED=fast
+```
+
+On the Pi, five repeated decodes of one captured 1280×960 badge frame took a median 16.6 ms with ZXing versus 154.5 ms with pyzbar using the scaled centre crop. Both returned identical payloads. ZXing also read a saved 640×480 frame that pyzbar missed; neither read the saved 1920×1440 frame. These are repeated saved-frame measurements, not independent walk-up success rates. The images showed noise and a bright reflection over part of the QR; a subsequent strip-on/off comparison is described below. Green capture feedback remains enabled; steady white illumination was subsequently disabled at the operator’s request.
+
+On the subsequent stationary-badge lighting comparison, alternating white/off twice with focus locked produced 226/226 decoded frames with white and 228/228 with the strip off. Median decode times were about 14 ms in both conditions. A bright reflection remained visible with the strip off. This test did not show a detection penalty from the strip, but does not measure walk-up autofocus acquisition, moving badges, or other lighting conditions. White illumination was retained for that comparison; it was subsequently disabled at the operator’s request.
+
+The five-presentation walk-up test with production continuous autofocus read all five presentations. GO-cue-to-first-read times were 0.678, 1.510, 1.239, 1.240, and 1.063 seconds (mean 1.146 seconds). These include reaction and badge movement into view, not just recognition latency. Snapshots showed blur during movement followed by successful reads; focus positions changed during presentation. This small test did not reproduce the reported 5–10 second delay and cannot isolate autofocus latency from motion. The service was confirmed active afterward; production settings were left unchanged.
+
 ### Performance environment settings
 
 Set these optional values in `.env`; process environment values take precedence. Defaults and validation live in [`scanner_config.py`](scanner_config.py). Restart the service after changing them.
@@ -324,7 +344,10 @@ Set these optional values in `.env`; process environment values take precedence.
 | --- | --- | --- |
 | `SCANNER_WIDTH` / `SCANNER_HEIGHT` | `640` / `480` | Positive, even YUV capture dimensions. |
 | `SCANNER_FPS` | `30` | Requested frame rate; verify the actual rate in metrics. |
-| `SCANNER_LENS_POSITION` | `20.0` | Manual focus position; calibrate at the presentation distance. |
+| `SCANNER_FOCUS_MODE` | `manual` | `manual` fixes lens position; `continuous` lets the camera refocus as badge distance changes. |
+| `SCANNER_LENS_POSITION` | `20.0` | Manual focus position; ignored in continuous mode. Calibrate at the presentation distance. |
+| `SCANNER_AF_RANGE` | `full` | Autofocus search range: `full`, `normal`, or `macro`; used only in continuous mode. |
+| `SCANNER_AF_SPEED` | `fast` | Autofocus search speed: `fast` or `normal`; used only in continuous mode. |
 | `SCANNER_EXPOSURE_US` | `0` | Automatic exposure at zero; positive values request manual exposure in microseconds. |
 | `SCANNER_GAIN` | `1.0` | Analogue gain when manual exposure is enabled. |
 | `SCANNER_BUFFER_COUNT` | `4` | Camera buffers; minimum two. |
@@ -348,10 +371,11 @@ These values live in [`qr_code_scanner.py`](qr_code_scanner.py):
 | Setting | Current value | Effect |
 | --- | ---: | --- |
 | `LED_BRIGHTNESS` | `1.0` | PWM LED duty-cycle value. |
-| `BUZZER_VOLUME` | `0.5` | PWM buzzer duty-cycle value. |
+| `BUZZER_VOLUME` | `0.5` | PWM duty cycle, not a linear volume control; retain 50% for the passive buzzer. |
+| `BUZZER_SCAN_FREQUENCY` | `4000` | Scan-result pitch in Hz, selected by an on-kiosk listening comparison. Local save, duplicate, and error use distinct timing patterns. |
 | `STRIP_LED_COUNT` | `60` | Number of addressable LEDs driven on GPIO 18. |
 | `STRIP_BRIGHTNESS` | `32` | WS281x brightness from 0 through 255. |
-| `STRIP_FLASH_SECONDS` | `1.0` | Duration of the green success/duplicate strip flash. |
+| `STRIP_FLASH_SECONDS` | `0.4` | Green capture/duplicate flash duration; the strip is otherwise off. |
 | `SUCCESS_HOLD_SECONDS` | `5` | Maximum success-feedback hold when a newer scan does not replace it. |
 | `RESULT_HOLD_SECONDS` | `0.8` | Maximum non-success feedback hold when a newer scan does not replace it. |
 | `CAMERA_CAPTURE_TIMEOUT_SECONDS` | `5` | Camera-frame timeout before a startup failure is shown. |
@@ -381,6 +405,7 @@ Service logs emit `METRICS:` JSON every 30 seconds by default. Each metric repor
 | `decode` | Crop and any full-frame QR search. |
 | `persist_queue_wait` / `persistence` | Wait before persistence / database save work. |
 | `decode_to_saved` | Decode completion to durable acceptance. |
+| `decode_to_saved_feedback` | Decode completion to local-save feedback and beep scheduling, independent of API response. |
 | `api_queue_wait` / `api` | Saved scan to API worker / request duration. |
 | `decode_to_result` | Decode completion through API result and outbox update. |
 | `feedback_queue_wait` / `decode_to_feedback` | Feedback worker wait / decode completion through result presentation. |
@@ -403,6 +428,20 @@ sudo systemctl start qrscanner.service
 The capture directory must not already exist. Keep captures outside the repository: they can contain private badge data. The tool creates a private directory (`0700`) and files (`0600`), uses the same `.env` camera settings as the scanner, records only the requested number of grayscale `.npy` frames, and never submits check-ins. Delete the captures after testing. Disk writes affect capture spacing, so use these files to compare decoder work on identical images; use live metrics for camera throughput.
 
 The benchmark reports median/p95 decode time, frames with reads, payload read counts, and agreement between backends. Agreement does not establish correctness without labelled ground truth. Unavailable backends are reported explicitly. Compare `SCANNER_CROP_SIZE=0` against `384` in live scanning too. To select ZXing after testing, set `SCANNER_DECODER=zxingcpp` in `.env` and restart; the default remains pyzbar. A missing selected backend fails startup instead of silently changing decoder.
+
+### Focus adjustment
+
+For freehand badge presentation, compare continuous autofocus with the fixed setting:
+
+```dotenv
+SCANNER_FOCUS_MODE=continuous
+SCANNER_AF_RANGE=full
+SCANNER_AF_SPEED=fast
+```
+
+Continuous mode runs in the camera pipeline without blocking QR decoding. It does not send a fixed `LensPosition`. `full` includes close-focus positions that `normal` may exclude; `macro` restricts the search to the closest part of the camera's range. Unsupported autofocus controls fail camera startup explicitly. The negotiated focus controls are printed in the startup log.
+
+Test actual badges through the installed plexiglass at several distances and lateral positions, including a badge arriving after the camera has focused on the empty background. Compare successful reads and time to the first read. Autofocus can take time to settle or hunt in poor light; it cannot recover QR detail that is too small in the image. Keep resolution, exposure, crop, and lighting unchanged during this comparison. To restore the previous behavior, set `SCANNER_FOCUS_MODE=manual` and `SCANNER_LENS_POSITION=20.0`, then restart the service.
 
 ### Camera experiments
 
@@ -491,16 +530,18 @@ After changing `scanner_init.sh` or any generated unit value, run `sudo systemct
 
 ## Status indicators
 
+The addressable strip stays off between scans. Each durably saved scan flashes green for 0.4 seconds at the configured brightness (32/255 by default) and beeps immediately, then the strip turns off without blocking scanning. Green capture feedback means recorded locally; API confirmation runs in the background. The separate traffic-light LEDs also communicate status. The strip turns off on scanner shutdown; check the camera view for reflections through the plexiglass when testing the new illumination.
+
 | Situation | Light state | Sound |
 | --- | --- | --- |
-| Ready | Traffic lights and strip off | Two rising startup tones only at launch |
-| Durably saved QR, awaiting API | Yellow traffic light; strip off | None before API result |
-| Checked in | Green traffic light; one-second green strip | Two short rising tones |
-| Duplicate payload | Green traffic light; one-second green strip | One medium tone |
-| Badge not found or invalid QR | Red traffic light and strip | One low long tone |
+| Ready | Traffic lights off; strip off | Two rising startup tones only at launch |
+| Durably saved QR, awaiting API | Green traffic light; strip briefly green, then off | Two short 4 kHz tones immediately after saving |
+| Checked in | Green traffic light; strip off | No additional beep |
+| Duplicate payload | Green traffic light; strip briefly green, then off | One medium-length 4 kHz tone |
+| Badge not found or invalid QR | Red traffic light; strip off | One long 4 kHz tone |
 | Saved scan queued after retryable API failure | Yellow traffic light; strip off | None |
-| Persistence queue full; scan not saved | Red traffic light and strip | One low long tone; retry badge |
-| Unexpected API status or startup failure | Red traffic light and strip | One low long tone |
+| Persistence queue full; scan not saved | Red traffic light; strip off | One long 4 kHz tone; retry badge |
+| Unexpected API status or startup failure | Red traffic light; strip off | One long 4 kHz tone |
 
 ## Operations and troubleshooting
 

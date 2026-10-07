@@ -41,6 +41,12 @@ class ScannerRuntimeTests(unittest.TestCase):
         self.runtime.API_TOKEN = "test-token"
         self.runtime.shutdown_event = threading.Event()
         self.runtime.STARTUP_FAILURE_RETRY_SECONDS = 0
+        self.signal_functions = {
+            name: getattr(self.runtime, name) for name in (
+                "signal_ready", "signal_processing", "signal_saved",
+                "signal_success", "signal_duplicate", "signal_failure",
+            )
+        }
         self.clock = 100.0
         self.frame_step = 1.0
         self.runtime.time = SimpleNamespace(monotonic=lambda: self.clock)
@@ -56,6 +62,9 @@ class ScannerRuntimeTests(unittest.TestCase):
         self.decoder = Mock()
         self.patch("QrDecoder", Mock(return_value=self.decoder))
         self.status = self.patch("show_status", Mock())
+        self.sound = self.patch("queue_sound", Mock())
+        self.saved_signal = self.patch("signal_saved", Mock())
+        self.success_signal = self.patch("signal_success", Mock())
         self.patch("strip_test_marker", Mock())
         self.patch("init_status_strip", Mock())
         self.events = []
@@ -66,6 +75,7 @@ class ScannerRuntimeTests(unittest.TestCase):
         self.feedback = Mock()
 
         def make_feedback(present, *args):
+            self.present_event = present
             def present_recorded(event):
                 self.events.append(event)
                 return present(event)
@@ -85,7 +95,7 @@ class ScannerRuntimeTests(unittest.TestCase):
             outcome = self.submit_outcomes.pop(0) if self.submit_outcomes else "accepted"
             if outcome == "busy":
                 return False
-            event = {"kind": outcome, "scan_id": scan_id,
+            event = {"kind": "accepted" if outcome == "saved_only" else outcome, "scan_id": scan_id,
                      "raw_payload": raw_payload, "elapsed": 0.001,
                      "detected_at": detected_at}
             if outcome == "error":
@@ -129,13 +139,56 @@ class ScannerRuntimeTests(unittest.TestCase):
         self.assertEqual(self.submissions, [BADGE])
         self.assertEqual([event["kind"] for event in self.events],
                          ["accepted", "result", "duplicate"])
-        self.status.assert_any_call("SAVED", "Checking badge")
+        self.status.assert_any_call("SAVED", "Scan next badge")
         self.status.assert_any_call("CHECKED IN", "")
         self.pipeline.start.assert_called_once()
         self.pipeline.stop.assert_called_once_with(timeout=15)
         self.outbox.close.assert_called_once()
         self.camera.stop.assert_called_once()
         self.capture.stop.assert_called_once()
+
+    def test_saved_badge_beeps_without_any_api_result(self):
+        self.submit_outcomes = ["saved_only"]
+        self.assertEqual(self.run_frames([[BADGE], []]), 0)
+        self.assertEqual([event["kind"] for event in self.events], ["accepted"])
+        self.sound.assert_any_call("saved")
+        self.saved_signal.assert_called_once()
+        self.success_signal.assert_not_called()
+        self.status.assert_any_call("SAVED", "Scan next badge")
+
+    def test_api_success_does_not_play_a_second_acknowledgement(self):
+        self.assertEqual(self.run_frames([[BADGE], []]), 0)
+        self.assertEqual([call.args[0] for call in self.sound.call_args_list],
+                         ["startup", "saved"])
+        self.success_signal.assert_called_once()
+
+    def test_older_success_cannot_overwrite_newer_saved_badge(self):
+        self.assertEqual(self.run_frames([]), 0)
+        for scan_id in (1, 2):
+            self.present_event({"kind": "accepted", "scan_id": scan_id,
+                                "raw_payload": BADGE, "detected_at": self.clock,
+                                "elapsed": 0.01})
+        self.present_event({"kind": "result", "scan_id": 1, "raw_payload": BADGE,
+                            "result": {"status": "checked_in"}})
+        self.success_signal.assert_not_called()
+        self.present_event({"kind": "result", "scan_id": 2, "raw_payload": BADGE,
+                            "result": {"status": "checked_in"}})
+        self.success_signal.assert_called_once()
+
+    def test_late_api_rejection_is_still_reported(self):
+        self.assertEqual(self.run_frames([]), 0)
+        self.present_event({"kind": "accepted", "scan_id": 2, "raw_payload": BADGE,
+                            "detected_at": self.clock, "elapsed": 0.01})
+        self.present_event({"kind": "result", "scan_id": 1, "raw_payload": BADGE,
+                            "result": {"status": "not_found"}})
+        self.sound.assert_called_with("failure")
+        self.status.assert_any_call("NOT FOUND", "See kiosk")
+
+    def test_failed_disk_write_does_not_acknowledge_capture(self):
+        self.submit_outcomes = ["error"]
+        self.assertEqual(self.run_frames([[BADGE], []]), 0)
+        self.saved_signal.assert_not_called()
+        self.assertNotIn("saved", [call.args[0] for call in self.sound.call_args_list])
 
     def test_busy_submission_remains_eligible_for_retry(self):
         self.submit_outcomes = ["busy", "accepted"]
@@ -191,6 +244,70 @@ class ScannerRuntimeTests(unittest.TestCase):
         self.pipeline.stop.return_value = False
         self.assertEqual(self.run_frames([]), 1)
         self.outbox.close.assert_not_called()
+
+    def test_strip_stays_off_for_non_capture_states(self):
+        strip = Mock()
+        strip.numPixels.return_value = 3
+        with patch.multiple(self.runtime, **self.signal_functions), patch.multiple(
+            self.runtime, USE_LIGHTS=False, USE_STRIP=True, status_strip=strip,
+            Color=lambda red, green, blue: (red, green, blue),
+        ):
+            for name in ("signal_ready", "signal_processing", "signal_failure"):
+                action = self.signal_functions[name]
+                with self.subTest(state=name):
+                    strip.reset_mock()
+                    action()
+                    self.assertEqual([call.args for call in strip.setPixelColor.call_args_list],
+                                     [(index, (0, 0, 0)) for index in range(3)])
+                    strip.show.assert_called_once()
+
+    def test_capture_flash_returns_to_off_without_waiting_for_api(self):
+        strip = Mock()
+        strip.numPixels.return_value = 1
+        with patch.multiple(self.runtime, **self.signal_functions), patch.multiple(
+            self.runtime, USE_LIGHTS=False, USE_STRIP=True, status_strip=strip,
+            Color=lambda *rgb: rgb,
+        ), patch.object(self.runtime.threading, "Timer") as timer:
+            for name in ("signal_saved", "signal_duplicate"):
+                with self.subTest(state=name):
+                    self.signal_functions[name]()
+                    strip.setPixelColor.assert_called_with(0, (0, 255, 0))
+                    timer.return_value.start.assert_called()
+                    self.assertEqual(timer.call_args.args[0], 0.4)
+                    strip.reset_mock()
+                    self.runtime.signal_success()
+                    strip.show.assert_not_called()
+                    timer.call_args.args[1]()
+                    strip.setPixelColor.assert_called_with(0, (0, 0, 0))
+
+    def test_old_flash_timer_cannot_override_new_flash_or_shutdown(self):
+        strip = Mock()
+        strip.numPixels.return_value = 1
+        with patch.multiple(self.runtime, USE_LIGHTS=False, USE_STRIP=True,
+                            status_strip=strip, Color=lambda *rgb: rgb), \
+                patch.object(self.runtime.threading, "Timer") as timer:
+            self.runtime.strip_flash_green()
+            old_callback = timer.call_args.args[1]
+            self.runtime.strip_flash_green()
+            new_callback = timer.call_args.args[1]
+            strip.reset_mock()
+            old_callback()
+            strip.show.assert_not_called()
+            self.runtime.lights_off()
+            strip.setPixelColor.assert_called_with(0, (0, 0, 0))
+            strip.reset_mock()
+            new_callback()
+            strip.show.assert_not_called()
+
+    def test_shutdown_turns_illumination_off(self):
+        strip = Mock()
+        strip.numPixels.return_value = 3
+        with patch.multiple(self.runtime, USE_LIGHTS=False, USE_STRIP=True,
+                            status_strip=strip, Color=lambda *rgb: rgb):
+            self.runtime.lights_off()
+        self.assertEqual([call.args for call in strip.setPixelColor.call_args_list],
+                         [(index, (0, 0, 0)) for index in range(3)])
+        strip.show.assert_called_once()
 
 
 if __name__ == "__main__":
